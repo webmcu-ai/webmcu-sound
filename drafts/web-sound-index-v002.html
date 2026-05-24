@@ -1,0 +1,1403 @@
+<!DOCTYPE html>
+<!-- webmcu-sound-web/index.html  v14
+     XIAO ESP32-S3 Sense — Wake Word Audio Classification over WebSerial
+     Firmware: webmcu-sound-web/web-sound-v14 (web-sound-v002.txt)
+     Architecture: Conv2D(3x3,4) -> MaxPool -> Conv2D(3x3,8) -> Flatten(1768) -> Dense -> Softmax
+     Input: 40-band Mel spectrogram, 32 frames (40x32x1 = 1280 floats)
+     By Jeremy Ellis  https://github.com/hpssjellis  MIT License
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<!-- [HTML-1] Title -->
+<title>XIAO ML Kit Sound/Wake-Word Classification Training over WebSerial. v14</title>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tensorflow/4.15.0/tf.min.js"></script>
+
+<style>
+/* ── [CSS-1] Model-specific CSS ─────────────────────────────── */
+body { font-family: monospace; font-size: 13px; margin: 8px; background: #111; color: #ddd; }
+h1   { font-size: 15px; margin: 4px 0; }
+h2   { font-size: 13px; margin: 6px 0 2px 0; background: #222; padding: 3px; }
+button { font-size: 12px; margin: 2px; padding: 3px 6px; cursor: pointer; }
+input[type=number], input[type=text], select { font-size: 12px; width: 70px; margin: 1px; }
+input[type=text].wide { width: 160px; }
+textarea { font-size: 11px; width: 98%; background: #1a1a1a; color: #ccc; border: 1px solid #444; }
+.row    { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin: 2px 0; }
+.section{ border: 1px solid #333; padding: 6px; margin-bottom: 6px; }
+.green  { background: #183018; }
+.serial-log { height: 140px; overflow-y: auto; background: #0a0a0a; color: #0f0; border: 1px solid #333; padding: 4px; font-size: 11px; }
+.bar-wrap { width: 220px; height: 16px; background: #333; border-radius: 3px; overflow: hidden; display: inline-block; vertical-align: middle; }
+.bar-fill { height: 100%; background: #3a8; transition: width 0.2s; }
+.infer-row { margin: 3px 0; display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.infer-label { width: 90px; overflow: hidden; white-space: nowrap; }
+.class-row td { padding: 1px 4px; vertical-align: middle; }
+#myWaveformCanvas { background: #0a0a0a; border: 1px solid #444; display: block; margin: 4px 0; }
+#mySpectroCanvas  { background: #0a0a0a; border: 1px solid #444; display: block; margin: 4px 0; }
+.connected    { color: #4f4; }
+.disconnected { color: #f44; }
+#myEpochBar   { width: 300px; height: 14px; background: #333; border-radius: 3px; overflow: hidden; display: inline-block; }
+#myEpochBarFill { height: 100%; background: #3a8; width: 0%; transition: width 0.3s; }
+.record-armed { background: #600 !important; color: #f88; }
+/* Sound-specific: mic level indicator */
+#myMicLevel   { width: 180px; height: 10px; background: #333; border-radius: 3px; overflow: hidden; display: inline-block; vertical-align: middle; }
+#myMicLevelFill { height: 100%; background: #38f; width: 0%; transition: width 0.05s; }
+</style>
+</head>
+<body>
+
+<!-- [HTML-1] Heading + links -->
+<h1>🎤 XIAO ML Kit Sound/Wake-Word Classification Training over WebSerial</h1>
+<div class="row">
+  <a href="https://github.com/webmcu-ai/webmcu-sound-web" target="_blank">webmcu-sound-web</a> |
+  <a href="https://arxiv.org/abs/2604.23012" target="_blank">arXiv:2604.23012</a> |
+  <a href="https://arxiv.org/abs/2604.22834" target="_blank">arXiv:2604.22834</a> |
+  <span id="myConnStatus" class="disconnected">● Disconnected</span>
+</div>
+
+<!-- [HTML-2] Description -->
+<p style="margin:3px 0; color:#aaa;">
+  Record 1-second audio clips on-device (PDM mic), compute 40-band Mel spectrograms,
+  train a Conv2D wake-word classifier directly on the XIAO ESP32-S3, then run
+  inference with VAD — all over WebSerial with no cloud required.
+</p>
+
+<!-- ═══ SECTION 1 — CONNECT ═══ -->
+<div class="section">
+<h2>Section 1 — WebSerial Connect</h2>
+<div class="row">
+  <button onclick="myConnect()">🔌 Connect</button>
+  <button onclick="myDisconnect()">⛔ Disconnect</button>
+  <button onclick="mySerialClearSelected(); mySendCmd('STATUS')">ℹ️ STATUS</button>
+  <button onclick="mySerialClearSelected(); mySendCmd('LOAD_CONFIG')">📥 Load Config</button>
+  <button onclick="mySerialClearSelected(); mySendCmd('LOAD_WEIGHTS')">📥 Load Weights</button>
+  <button onclick="mySerialClearSelected(); mySendCmd('SEND_WEIGHTS')">📤 Get Weights</button>
+</div>
+
+<!-- [HTML-3] Serial shortcut buttons (auto-rendered by myRenderSerialButtons) -->
+<div id="mySerialButtons" class="row" style="margin-top:4px;"></div>
+
+<!-- [HTML-4] Sound-specific serial buttons -->
+<div class="row" style="margin-top:4px;">
+  <b>Sound:</b>
+  <button id="myBtnRecordStop" onclick="mySerialClearSelected(); mySendCmd('RECORD_STOP')">⏹ Record Stop</button>
+  <button onclick="mySerialClearSelected(); mySendCmd('RECORD_STATUS')">❓ Record Status</button>
+</div>
+
+<div class="serial-log" id="mySerialLog"></div>
+<div class="row">
+  <input type="text" id="myRawCmd" class="wide" placeholder="raw command" onkeydown="if(event.key==='Enter') mySendRaw()">
+  <button onclick="mySendRaw()">Send</button>
+  <button onclick="document.getElementById('mySerialLog').innerHTML=''">Clear Log</button>
+</div>
+</div>
+
+<!-- ═══ SECTION 2 — DECISIONS BEFORE TRAINING ═══ -->
+<div class="section">
+<h2>Section 2 — Decisions Before Training</h2>
+
+<!-- [HTML-5a] Sound sensor parameters (replaces resolution selector) -->
+<div class="row">
+  <b>Sample Rate:</b>
+  <select id="mySampleRateSel" onchange="myUpdateEpochHint()">
+    <option value="16000" selected>16000 Hz</option>
+  </select>
+  <b>Mel Bins:</b>
+  <input type="number" id="myMelBinsIn" value="40" min="16" max="64" style="width:50px" onchange="myUpdateEpochHint()">
+  <b>Mel Frames:</b>
+  <input type="number" id="myMelFramesIn" value="32" min="16" max="64" style="width:50px" onchange="myUpdateEpochHint()">
+  <b>FFT Size:</b>
+  <select id="myFftSizeSel">
+    <option value="256">256</option>
+    <option value="512" selected>512</option>
+    <option value="1024">1024</option>
+  </select>
+</div>
+<div class="row">
+  <b>Conv1 Filters:</b>
+  <input type="number" id="myConv1FiltersIn" value="4" min="2" max="32" style="width:50px">
+  <b>Conv2 Filters:</b>
+  <input type="number" id="myConv2FiltersIn" value="8" min="2" max="64" style="width:50px">
+  <span id="myRamHint" style="color:#a8a; font-size:11px;"></span>
+</div>
+<div class="row">
+  <b>Validation %:</b>
+  <select id="myValidationPct" onchange="myUpdateValBox()">
+    <option value="0">0%</option>
+    <option value="10" selected>10%</option>
+    <option value="20">20%</option>
+    <option value="25">25%</option>
+  </select>
+  <span id="myValBox" style="font-size:11px; color:#aaa;"></span>
+</div>
+<div id="myEpochHint" style="font-size:11px; color:#aaa; margin-top:3px;"></div>
+</div>
+
+<!-- ═══ SECTION 3 — FILE & SD TRANSFER ═══ -->
+<div class="section">
+<h2>Section 3 — File &amp; SD Transfer</h2>
+<div class="row">
+  <button onclick="myPickSaveFolder()">📁 Set PC Save Folder</button>
+  <button onclick="myPickAndLoadFolder()">📂 Load Audio Folder from PC</button>
+  <button onclick="myLoadModelFromFolder()">🧠 Load Model from PC Folder</button>
+</div>
+<div class="row">
+  <button onclick="myExportBin()">💾 Export myWeights.bin (PC)</button>
+  <button onclick="myExportConfigJson()">⚙️ Export config.json (PC)</button>
+  <button onclick="myLoadWeightsBinFromLines()">📤 Load myWeights.bin → model</button>
+</div>
+<div class="row" style="margin-top:4px;">
+  <button onclick="myExportBinToSd()" style="background:#224422; color:#8f8;">💾 Send Weights → SD</button>
+  <button onclick="myExportConfigJsonToSd()" style="background:#224422; color:#8f8;">⚙️ Send Config → SD</button>
+  <button onclick="mySaveBothToSd()" style="background:#0a3a0a; color:#4f4; font-weight:bold; padding:5px 10px;">
+    🟢 Save Both (Weights + Config) → SD
+  </button>
+</div>
+<div class="row" style="margin-top:4px;">
+  <button onclick="myXferPickFolder()">📁 Pick Audio Folder for Bulk Transfer</button>
+  <button onclick="mySendAllToSd()">⬆️ Send All Audio → SD</button>
+  <button onclick="myXferReceiveAllFromSd()">⬇️ Get All Audio ← SD</button>
+  <button onclick="myXferAbort()" style="background:#400;">✖ Abort Transfer</button>
+</div>
+<div id="myXferStatus" style="font-size:11px; color:#a8a; margin-top:3px;"></div>
+
+<!-- SD Browser -->
+<div style="margin-top:6px;">
+  <b>SD Browser:</b>
+  <input type="text" id="mySdPath" value="/" class="wide">
+  <button onclick="mySerialClearSelected(); mySendCmd('SD_LIST ' + document.getElementById('mySdPath').value)">📂 List</button>
+  <button onclick="mySerialClearSelected(); mySendCmd('SD_READ:' + document.getElementById('mySdPath').value)">📄 Read</button>
+  <button onclick="mySerialClearSelected(); mySendCmd('SD_DELETE:' + document.getElementById('mySdPath').value)">🗑 Delete</button>
+  <div id="mySdContent" style="font-size:11px; color:#aaa; max-height:80px; overflow-y:auto; background:#0a0a0a; padding:3px; margin-top:3px;"></div>
+</div>
+</div>
+
+<!-- ═══ SECTION 4 — DATA COLLECTION ═══ -->
+<div class="section">
+<h2>Section 4 — Data Collection</h2>
+
+<!-- [HTML-5b] Sound tile: waveform + spectrogram display + mic controls -->
+<div class="row">
+  <div>
+    <b>Mic:</b>
+    <button id="myMicBtn" onclick="myToggleMic()">🎤 Start Mic</button>
+    <span style="font-size:11px; color:#aaa;">Level:</span>
+    <div id="myMicLevel"><div id="myMicLevelFill"></div></div>
+    <span id="myMicRms" style="font-size:11px; color:#aaa;"></span>
+  </div>
+</div>
+<canvas id="myWaveformCanvas" width="400" height="60"></canvas>
+<canvas id="mySpectroCanvas" width="400" height="80" title="Live Mel spectrogram preview (browser-side)"></canvas>
+<div style="font-size:10px; color:#666; margin-bottom:3px;">
+  ↑ Browser mic preview only — clips are recorded on-device via PDM mic
+</div>
+
+<!-- [HTML-5c] PC folder path comment -->
+<div style="font-size:11px; color:#888; margin: 3px 0;">
+  <!-- PC save folder mirrors SD layout: audio/&lt;ClassName&gt;/clip_NNNNN.wav -->
+  PC folder mirrors SD:  /audio/&lt;ClassName&gt;/clip_NNNNN.wav
+</div>
+
+<!-- Number of classes selector -->
+<div class="row" style="margin:4px 0;">
+  <b># Classes:</b>
+  <select id="myNumClassesSel" onchange="myOnNumClassesChange(parseInt(this.value))">
+    <option value="2">2</option>
+    <option value="3" selected>3</option>
+    <option value="4">4</option>
+    <option value="5">5</option>
+    <option value="6">6</option>
+    <option value="7">7</option>
+    <option value="8">8</option>
+  </select>
+  <span style="font-size:11px; color:#aaa;">Changing resets class data</span>
+</div>
+
+<!-- [HTML-5d] Class rows (rendered by myRenderClassRows) -->
+<table id="myClassTable" style="border-collapse:collapse; width:100%;"></table>
+
+<!-- [HTML-5e] Capture button description -->
+<p style="font-size:11px; color:#888; margin:3px 0;">
+  🎤 Record button sends RECORD_START:&lt;classIdx&gt; to device — device records 1s via PDM mic and saves WAV to SD.
+  After recording, COLLECT_COUNT updates the counter. Clips are stored under /audio/&lt;ClassName&gt;/ on the SD card.
+</p>
+</div>
+
+<!-- ═══ SECTION 5 — TRAIN ═══ -->
+<div class="section">
+<h2>Section 5 — Train</h2>
+
+<!-- [HTML-7] Training hyperparameters — sound model -->
+<div class="row">
+  <b>Batch:</b><input type="number" id="myBatchSize" value="12" min="1" max="64" style="width:50px">
+  <b>LR:</b><input type="number" id="myLR" value="0.003" step="0.001" min="0.0001" style="width:70px">
+  <b>Epochs:</b><input type="number" id="myTargetEpochs" value="20" min="1" max="200" style="width:55px">
+</div>
+<div class="row">
+  <b>VAD Threshold:</b><input type="number" id="myVadThreshIn" value="500" min="50" max="5000" style="width:70px">
+  <b>VAD Window ms:</b><input type="number" id="myVadWindowIn" value="100" min="20" max="500" style="width:60px">
+</div>
+<div class="row" style="margin-top:6px;">
+  <button onclick="myStartTraining()" style="background:#1a3a1a; color:#8f8; padding:5px 12px; font-weight:bold;">▶ Train</button>
+  <button onclick="myForceStartTraining()" style="background:#3a1a00; color:#fc8;">⚡ Force Train (skip min-samples check)</button>
+  <label><input type="checkbox" id="myAutoSave"> Auto-save weights to SD after each epoch</label>
+</div>
+<div class="row" style="margin-top:4px;">
+  Epoch: <span id="myEpochNum">—</span> / <span id="myTotalEpochs">—</span>
+  Loss: <span id="myLossVal">—</span>
+  Acc: <span id="myAccVal">—</span>
+  <div id="myEpochBar"><div id="myEpochBarFill"></div></div>
+</div>
+<canvas id="myLossCanvas" width="400" height="80" style="background:#0a0a0a; border:1px solid #333; margin-top:4px; display:block;"></canvas>
+</div>
+
+<!-- ═══ SECTION 6 — INFERENCE ═══ -->
+<div class="section">
+<h2>Section 6 — Inference</h2>
+<div class="row">
+  <button onclick="mySerialClearSelected(); mySendCmd('INFER_NOW')" style="background:#1a2a3a; color:#8af;">🔍 Infer Now (on-device)</button>
+  <button onclick="myBrowserInfer()">🧠 Browser Infer (from mic)</button>
+</div>
+
+<!-- [HTML-6a] Classification bar chart inference display -->
+<div id="myOutputDisplay" style="margin-top:6px;">
+  <div id="myInferBars"></div>
+  <div id="myInferLabel" style="font-size:14px; font-weight:bold; margin-top:4px; color:#4f4;"></div>
+</div>
+
+<!-- [HTML-6b] Heatmap buttons — REMOVED (non-vision model) -->
+<!-- No heatmap for audio model -->
+</div>
+
+<!-- ═══ SECTION 7 — CONFUSION MATRIX ═══ -->
+<!-- [HTML-8] Classification: keep confusion matrix -->
+<div class="section">
+<h2>Section 7 — Confusion Matrix (Browser Training)</h2>
+<div id="myConfusionMatrix" style="font-size:11px;"></div>
+<canvas id="myConfCanvas" width="300" height="300" style="background:#0a0a0a; border:1px solid #333; display:none;"></canvas>
+</div>
+
+<!-- ═══ SECTION 8 — CONFIG EXPORT ═══ -->
+<div class="section">
+<h2>Section 8 — Config Export</h2>
+
+<!-- [HTML-9] Config fields — base + sound-specific -->
+<div class="row">
+  <b>Firmware Version:</b>
+  <input type="number" id="myCfgFwVersion" value="14" style="width:50px" onchange="myRefreshConfigTextarea()">
+  <b>Validation %:</b>
+  <input type="number" id="myCfgValidationPct" value="10" min="0" max="40" style="width:50px" onchange="myRefreshConfigTextarea()">
+</div>
+<div class="row">
+  <b>sampleRate:</b>
+  <input type="number" id="myCfgSampleRate" value="16000" style="width:70px" onchange="myRefreshConfigTextarea()">
+  <b>melBins:</b>
+  <input type="number" id="myCfgMelBins" value="40" style="width:50px" onchange="myRefreshConfigTextarea()">
+  <b>melFrames:</b>
+  <input type="number" id="myCfgMelFrames" value="32" style="width:50px" onchange="myRefreshConfigTextarea()">
+</div>
+<div class="row">
+  <b>fftSize:</b>
+  <input type="number" id="myCfgFftSize" value="512" style="width:60px" onchange="myRefreshConfigTextarea()">
+  <b>vadThreshold:</b>
+  <input type="number" id="myCfgVadThreshold" value="500" style="width:60px" onchange="myRefreshConfigTextarea()">
+  <b>vadWindowMs:</b>
+  <input type="number" id="myCfgVadWindowMs" value="100" style="width:55px" onchange="myRefreshConfigTextarea()">
+</div>
+<div class="row">
+  <b>conv1Filters:</b>
+  <input type="number" id="myCfgConv1" value="4" style="width:50px" onchange="myRefreshConfigTextarea()">
+  <b>conv2Filters:</b>
+  <input type="number" id="myCfgConv2" value="8" style="width:50px" onchange="myRefreshConfigTextarea()">
+  <label><input type="checkbox" id="myCfgUseAugmentation" onchange="myRefreshConfigTextarea()"> useAugmentation</label>
+  <label><input type="checkbox" id="myCfgUseGrayscale" checked onchange="myRefreshConfigTextarea()"> grayscale/mono</label>
+</div>
+<textarea id="myConfigTextarea" rows="10" style="margin-top:4px;"></textarea>
+<div class="row" style="margin-top:4px;">
+  <button onclick="myLoadConfigFromTextarea()">📥 Apply Config from Textarea</button>
+</div>
+</div>
+
+<!-- ── JS ── -->
+<script>
+// ══════════════════════════════════════════════════════════════
+// webmcu-sound-web/index.html  v14
+// XIAO ESP32-S3 Sense — Wake Word Classification over WebSerial
+// ══════════════════════════════════════════════════════════════
+
+// ── [JS-1] State variables ────────────────────────────────────
+var myPort = null;
+var myReader = null;
+var myWriter = null;
+var myNumClasses = 3;
+var myTrainData   = [];   // myTrainData[classIdx] = array of Float32Array(1280)
+var myRawData     = [];   // myRawData[classIdx] = array of {label, data} (same as train)
+var myDiskTotals  = [];   // counts loaded from disk/SD
+var myAutoSaveCounters = [];
+
+// [JS-1b] Sound-specific state
+var myMicStream   = null;
+var myAudioCtx    = null;
+var myAnalyser    = null;
+var myMicActive   = false;
+var myWaveAnimId  = null;
+var myModel       = null;
+var myIsTrained   = false;
+var myIsTraining  = false;
+var myTrainAbort  = false;
+
+// File transfer state (v78 protocol)
+var myFileTransferResolve = null;
+var myFileTransferReject  = null;
+var myFileRecvBuffer = '';
+var myFileRecvActive = false;
+var myFileRecvLines  = [];
+
+// SD browser state
+var mySdBrowseLines = [];
+var mySdReadLines   = [];
+var mySdReadActive  = false;
+
+// xfer bulk transfer state
+var myXferFolder     = null;
+var myXferFiles      = [];
+var myXferAbortFlag  = false;
+
+// Loss history for chart
+var myLossHistory = [];
+var myAccHistory  = [];
+
+// Shared canvas (reused for all decode paths)
+var myEspTempCanvas = document.createElement('canvas');
+myEspTempCanvas.width  = 40;
+myEspTempCanvas.height = 32;
+var myEspTempCtx = myEspTempCanvas.getContext('2d');
+
+// ── [JS-2] Helpers ────────────────────────────────────────────
+
+function myLog(msg) {
+  var el = document.getElementById('mySerialLog');
+  el.innerHTML += '<br>' + msg;
+  el.scrollTop = el.scrollHeight;
+}
+
+function myReinitClassData(n) {
+  // Dispose any existing tensors
+  if (myTrainData) {
+    myTrainData.forEach(arr => arr && arr.forEach && arr.forEach(t => { if (t && t.dispose) t.dispose(); }));
+  }
+  myNumClasses = n;
+  myTrainData         = Array.from({length: n}, () => []);
+  myRawData           = Array.from({length: n}, () => []);
+  myDiskTotals        = Array.from({length: n}, () => 0);
+  myAutoSaveCounters  = Array.from({length: n}, () => 0);
+}
+
+function myGetLabels() {
+  var labels = [];
+  for (var i = 0; i < myNumClasses; i++) {
+    var el = document.getElementById('myLabel' + i);
+    labels.push(el ? el.value : '' + i);
+  }
+  return labels;
+}
+
+// [JS-2a] myUpdateEpochHint
+function myUpdateEpochHint() {
+  var melBins   = parseInt(document.getElementById('myMelBinsIn').value) || 40;
+  var melFrames = parseInt(document.getElementById('myMelFramesIn').value) || 32;
+  var inputSize = melBins * melFrames;
+  document.getElementById('myEpochHint').textContent =
+    'Input: ' + melFrames + '×' + melBins + '×1 = ' + inputSize + ' floats (Mel spectrogram)';
+  myUpdateRamHint();
+  myRefreshConfigTextarea();
+}
+
+function myUpdateRamHint() {
+  var c1 = parseInt(document.getElementById('myConv1FiltersIn').value) || 4;
+  var c2 = parseInt(document.getElementById('myConv2FiltersIn').value) || 8;
+  var flatSize = (13) * (17) * c2;  // approximate for 40x32 input
+  var wCount = (9 * c1) + c1 + (9 * c1 * c2) + c2 + (flatSize * myNumClasses) + myNumClasses;
+  var ramKb = Math.round(wCount * 4 / 1024);
+  document.getElementById('myRamHint').textContent = '≈' + wCount + ' weights ≈' + ramKb + ' KB';
+}
+
+function myUpdateValBox() {
+  var pct  = parseInt(document.getElementById('myValidationPct').value) || 10;
+  var total = myTrainData.reduce((s, a) => s + a.length, 0);
+  var valN  = Math.floor(total * pct / 100);
+  document.getElementById('myValBox').textContent = '→ ~' + valN + ' validation clips from ' + total + ' total';
+}
+
+// ── [JS-3] Serial input handling ──────────────────────────────
+
+var mySerialBuffer = '';
+
+async function myReadLoop() {
+  try {
+    while (true) {
+      var { value, done } = await myReader.read();
+      if (done) break;
+      mySerialBuffer += value;
+      var lines = mySerialBuffer.split('\n');
+      mySerialBuffer = lines.pop();
+      for (var line of lines) {
+        line = line.replace(/\r/g, '').trim();
+        if (line.length === 0) continue;
+        myHandleSerialData(line);
+      }
+    }
+  } catch(e) {
+    myLog('Serial read error: ' + e.message);
+  }
+}
+
+// [JS-3a] INFER: token parser — matches firmware: INFER:<label>,<confidence>
+function myHandleSerialData(line) {
+  // ── Standard scaffold tokens ──────────────────────────────────
+  if (line.startsWith('TRAIN_EPOCH:')) {
+    // TRAIN_EPOCH:<epoch>,<loss>,<acc>  (acc is 0.0–1.0)
+    var parts = line.substring(12).split(',');
+    var ep   = parseInt(parts[0]);
+    var loss = parseFloat(parts[1]);
+    var acc  = parseFloat(parts[2]) * 100;
+    var tgt  = parseInt(document.getElementById('myTargetEpochs').value) || 20;
+    document.getElementById('myEpochNum').textContent   = ep;
+    document.getElementById('myTotalEpochs').textContent = tgt;
+    document.getElementById('myLossVal').textContent    = loss.toFixed(4);
+    document.getElementById('myAccVal').textContent     = acc.toFixed(1) + '%';
+    document.getElementById('myEpochBarFill').style.width = Math.round(ep / tgt * 100) + '%';
+    myLossHistory.push(loss);
+    myAccHistory.push(acc / 100);
+    myDrawLossChart();
+    if (document.getElementById('myAutoSave').checked) {
+      mySendCmd('SAVE_WEIGHTS');
+    }
+    myLog('[EPOCH] ' + ep + '/' + tgt + '  loss=' + loss.toFixed(4) + '  acc=' + acc.toFixed(1) + '%');
+    return;
+  }
+
+  if (line.startsWith('COLLECT_COUNT:')) {
+    // COLLECT_COUNT:<classIdx>,<count>
+    var parts = line.substring(14).split(',');
+    var ci = parseInt(parts[0]);
+    var cnt = parseInt(parts[1]);
+    var el = document.getElementById('myCount' + ci);
+    if (el) el.textContent = cnt;
+    myLog('[COLLECT] class=' + ci + ' count=' + cnt);
+    return;
+  }
+
+  if (line.startsWith('INFER:')) {
+    // INFER:<label>,<confidence>  confidence is 0.0–1.0
+    var rest  = line.substring(6);
+    var comma = rest.lastIndexOf(',');
+    var label = rest.substring(0, comma);
+    var conf  = parseFloat(rest.substring(comma + 1));
+    myUpdateInferenceDisplay(label, conf, null);
+    myLog('[INFER] ' + label + '  conf=' + (conf * 100).toFixed(1) + '%');
+    return;
+  }
+
+  // ── SD browser tokens ────────────────────────────────────────
+  if (line === 'SD_LIST_END') {
+    var el = document.getElementById('mySdContent');
+    el.innerHTML = mySdBrowseLines.join('<br>');
+    mySdBrowseLines = [];
+    return;
+  }
+  if (line.startsWith('SD_LIST_START') || line.startsWith('SD_DIR:') || line.startsWith('SD_FILE:')) {
+    mySdBrowseLines.push(line);
+    return;
+  }
+  if (line.startsWith('SD_READ_START:')) {
+    mySdReadLines  = [];
+    mySdReadActive = true;
+    return;
+  }
+  if (line === 'SD_READ_END') {
+    mySdReadActive = false;
+    myLog('[SD_READ] ' + mySdReadLines.length + ' lines');
+    return;
+  }
+  if (mySdReadActive) {
+    mySdReadLines.push(line);
+    return;
+  }
+
+  // ── Binary file transfer ACK tokens (v78) ───────────────────
+  if (line.startsWith('OK:CHUNK_ACK:') || line.startsWith('OK:FILE_DONE:') || line.startsWith('OK:FILE_READY') ||
+      line.startsWith('ERR:CHUNK_RETRY:') || line.startsWith('ERR:FILE_SIZE')) {
+    if (myFileTransferResolve) myFileTransferResolve(line);
+    myLog('[XFER] ' + line);
+    return;
+  }
+
+  // [JS-3b] Sound-specific incoming serial tokens
+  if (line.startsWith('RECORD_STATUS:')) {
+    myLog('[REC] ' + line.substring(14));
+    return;
+  }
+
+  // CONFIG / WEIGHTS confirmations
+  if (line.startsWith('CONFIG:') || line.startsWith('WEIGHTS:')) {
+    myLog('[' + line.split(':')[0] + '] ' + line);
+    return;
+  }
+
+  // STATUS lines
+  if (line.startsWith('STATUS:')) {
+    myLog('[STATUS] ' + line.substring(7));
+    return;
+  }
+
+  // Default: log everything else
+  myLog(line);
+}
+
+// ── [JS-4] Sensor / audio section ────────────────────────────
+
+// [JS-4a] Mic init (browser preview only — clips recorded on-device)
+async function myToggleMic() {
+  if (myMicActive) {
+    myStopMic();
+  } else {
+    await myStartMic();
+  }
+}
+
+async function myStartMic() {
+  try {
+    myAudioCtx  = new (window.AudioContext || window.webkitAudioContext)({sampleRate: 16000});
+    myMicStream = await navigator.mediaDevices.getUserMedia({audio: {sampleRate: 16000, channelCount: 1}, video: false});
+    var source  = myAudioCtx.createMediaStreamSource(myMicStream);
+    myAnalyser  = myAudioCtx.createAnalyser();
+    myAnalyser.fftSize = 512;
+    source.connect(myAnalyser);
+    myMicActive = true;
+    document.getElementById('myMicBtn').textContent = '🔴 Stop Mic';
+    myDrawWaveform();
+  } catch(e) {
+    myLog('Mic error: ' + e.message);
+  }
+}
+
+function myStopMic() {
+  if (myMicStream) { myMicStream.getTracks().forEach(t => t.stop()); myMicStream = null; }
+  if (myAudioCtx)  { myAudioCtx.close(); myAudioCtx = null; }
+  myAnalyser = null;
+  myMicActive = false;
+  document.getElementById('myMicBtn').textContent = '🎤 Start Mic';
+  if (myWaveAnimId) { cancelAnimationFrame(myWaveAnimId); myWaveAnimId = null; }
+}
+
+// [JS-2] myDrawWaveform — browser-side waveform preview
+function myDrawWaveform() {
+  if (!myAnalyser) return;
+  var wCanvas = document.getElementById('myWaveformCanvas');
+  var wCtx    = wCanvas.getContext('2d');
+  var buf     = new Uint8Array(myAnalyser.fftSize);
+  myAnalyser.getByteTimeDomainData(buf);
+
+  wCtx.fillStyle = '#0a0a0a';
+  wCtx.fillRect(0, 0, wCanvas.width, wCanvas.height);
+  wCtx.strokeStyle = '#38f';
+  wCtx.lineWidth = 1;
+  wCtx.beginPath();
+  var step = wCanvas.width / buf.length;
+  for (var i = 0; i < buf.length; i++) {
+    var y = (buf[i] / 128.0 - 1.0) * (wCanvas.height / 2) + wCanvas.height / 2;
+    i === 0 ? wCtx.moveTo(i * step, y) : wCtx.lineTo(i * step, y);
+  }
+  wCtx.stroke();
+
+  // RMS level indicator
+  var sumSq = 0;
+  for (var v of buf) { var s = v / 128.0 - 1.0; sumSq += s * s; }
+  var rms = Math.sqrt(sumSq / buf.length);
+  document.getElementById('myMicLevelFill').style.width = Math.min(100, rms * 200) + '%';
+  document.getElementById('myMicRms').textContent = rms.toFixed(3);
+
+  // Simple spectrogram preview (FFT magnitudes as column)
+  var sCanvas = document.getElementById('mySpectroCanvas');
+  var sCtx    = sCanvas.getContext('2d');
+  var freqBuf = new Uint8Array(myAnalyser.frequencyBinCount);
+  myAnalyser.getByteFrequencyData(freqBuf);
+  // Scroll left
+  var imgData = sCtx.getImageData(1, 0, sCanvas.width - 1, sCanvas.height);
+  sCtx.putImageData(imgData, 0, 0);
+  // Draw new column on right
+  var binH = sCanvas.height / Math.min(40, freqBuf.length);
+  for (var b = 0; b < Math.min(40, freqBuf.length); b++) {
+    var v = freqBuf[b];
+    sCtx.fillStyle = 'rgb(' + v + ',' + Math.floor(v * 0.5) + ',0)';
+    sCtx.fillRect(sCanvas.width - 1, sCanvas.height - (b + 1) * binH, 1, binH);
+  }
+
+  myWaveAnimId = requestAnimationFrame(myDrawWaveform);
+}
+
+// [JS-4b] myGetCurrentSpectrogram — browser-side (for browser training)
+// Returns Float32Array(melFrames * melBins) — simplified browser FFT
+async function myGetCurrentSpectrogram() {
+  if (!myAnalyser || !myAudioCtx) return null;
+  var melBins   = parseInt(document.getElementById('myMelBinsIn').value) || 40;
+  var melFrames = parseInt(document.getElementById('myMelFramesIn').value) || 32;
+  var bufSize   = myAnalyser.fftSize;
+  var freqBuf   = new Float32Array(myAnalyser.frequencyBinCount);
+  var out       = new Float32Array(melFrames * melBins);
+  // Fill with current snapshot replicated across frames (live single-frame preview)
+  myAnalyser.getFloatFrequencyData(freqBuf);
+  // Map FFT bins to mel bins (linear approximation)
+  for (var fr = 0; fr < melFrames; fr++) {
+    for (var m = 0; m < melBins; m++) {
+      var bin = Math.floor(m / melBins * freqBuf.length);
+      var v   = (freqBuf[bin] + 80) / 80;  // normalize dB
+      out[fr * melBins + m] = Math.max(0, Math.min(1, v));
+    }
+  }
+  return out;
+}
+
+// [JS-4c] myCollect — sends RECORD_START to device per class
+async function myCollect(classIdx) {
+  mySerialClearSelected();
+  mySendCmd('RECORD_START:' + classIdx);
+  myLog('Recording request sent for class ' + classIdx + ' (' + myGetLabels()[classIdx] + ')');
+}
+
+// [JS-4d] myAutoSaveToDisk
+async function myAutoSaveToDisk(classIdx, data) {
+  if (!myPickedFolder) return;
+  try {
+    var labels  = myGetLabels();
+    var label   = labels[classIdx] || ('' + classIdx);
+    var subfolder = await myPickedFolder.getDirectoryHandle('audio', {create: true});
+    var classDir  = await subfolder.getDirectoryHandle(label, {create: true});
+    myAutoSaveCounters[classIdx] = (myAutoSaveCounters[classIdx] || 0) + 1;
+    var fname   = 'clip_' + String(myAutoSaveCounters[classIdx]).padStart(5, '0') + '.f32';
+    var fh      = await classDir.getFileHandle(fname, {create: true});
+    var writable = await fh.createWritable();
+    await writable.write(data.buffer);
+    await writable.close();
+    myLog('Auto-saved ' + fname);
+  } catch(e) {
+    myLog('Auto-save error: ' + e);
+  }
+}
+
+// [JS-4e] myPickSaveFolder
+var myPickedFolder = null;
+async function myPickSaveFolder() {
+  try {
+    myPickedFolder = await window.showDirectoryPicker({mode: 'readwrite'});
+    myLog('Save folder set: ' + myPickedFolder.name);
+  } catch(e) {
+    myLog('Folder pick cancelled');
+  }
+}
+
+// [JS-4f] myPickAndLoadFolder — loads .f32 clips from PC audio folder
+async function myPickAndLoadFolder() {
+  try {
+    var rootDir = await window.showDirectoryPicker({mode: 'read'});
+    var labels  = myGetLabels();
+    try {
+      var audioDir = await rootDir.getDirectoryHandle('audio');
+      for (var ci = 0; ci < myNumClasses; ci++) {
+        try {
+          var classDir = await audioDir.getDirectoryHandle(labels[ci]);
+          for await (var [name, fh] of classDir.entries()) {
+            if (!name.endsWith('.f32') && !name.endsWith('.bin')) continue;
+            var file = await fh.getFile();
+            var ab   = await file.arrayBuffer();
+            var fa   = new Float32Array(ab);
+            myTrainData[ci].push(fa);
+            myDiskTotals[ci]++;
+            var el = document.getElementById('myCount' + ci);
+            if (el) el.textContent = myTrainData[ci].length;
+          }
+        } catch(e2) {}
+      }
+    } catch(e) {
+      myLog('No /audio subfolder found — looking in root');
+      for (var ci = 0; ci < myNumClasses; ci++) {
+        try {
+          var classDir = await rootDir.getDirectoryHandle(labels[ci]);
+          for await (var [name, fh] of classDir.entries()) {
+            if (!name.endsWith('.f32') && !name.endsWith('.bin')) continue;
+            var file = await fh.getFile();
+            var ab   = await file.arrayBuffer();
+            myTrainData[ci].push(new Float32Array(ab));
+            var el = document.getElementById('myCount' + ci);
+            if (el) el.textContent = myTrainData[ci].length;
+          }
+        } catch(e3) {}
+      }
+    }
+    myUpdateValBox();
+    myLog('Folder load complete');
+  } catch(e) {
+    myLog('Folder load cancelled or error: ' + e);
+  }
+}
+
+// [JS-4g] myLoadModelFromFolder — loads myWeights.bin + config.json from PC
+async function myLoadModelFromFolder() {
+  try {
+    var dir = await window.showDirectoryPicker({mode: 'read'});
+    // Try header subfolder first
+    var targetDir = dir;
+    try { targetDir = await dir.getDirectoryHandle('header'); } catch(e) {}
+    var binFh  = await targetDir.getFileHandle('myWeights.bin');
+    var cfgFh  = await targetDir.getFileHandle('config.json').catch(() => null);
+    if (cfgFh) {
+      var cfgFile = await cfgFh.getFile();
+      var cfgText = await cfgFile.text();
+      myApplyConfigJson(cfgText);
+    }
+    var binFile = await binFh.getFile();
+    var binAb   = await binFile.arrayBuffer();
+    await myLoadWeightsBinFromBytes(binAb);
+    myLog('Model loaded from PC folder');
+  } catch(e) {
+    myLog('Load model error: ' + e);
+  }
+}
+
+// [JS-4h] myLoadImages stub — not used for audio model
+async function myLoadImages() { myLog('Use Pick Audio Folder instead'); }
+
+// ── [JS-5] myBuildModel ───────────────────────────────────────
+// Matches firmware: Conv2D(3x3,C1) -> MaxPool2D(2x2) -> Conv2D(3x3,C2) -> Flatten -> Dense -> Softmax
+// Input: [1, melFrames, melBins, 1]
+
+function myBuildModel() {
+  if (myModel) { myModel.dispose(); myModel = null; }
+  var melBins   = parseInt(document.getElementById('myMelBinsIn').value) || 40;
+  var melFrames = parseInt(document.getElementById('myMelFramesIn').value) || 32;
+  var c1 = parseInt(document.getElementById('myConv1FiltersIn').value) || 4;
+  var c2 = parseInt(document.getElementById('myConv2FiltersIn').value) || 8;
+  var nClasses = myGetLabels().length;
+
+  var inp = tf.input({shape: [melFrames, melBins, 1]});
+  var x   = tf.layers.conv2d({filters: c1, kernelSize: 3, activation: 'relu', padding: 'valid'}).apply(inp);
+  x       = tf.layers.maxPooling2d({poolSize: [2, 2]}).apply(x);
+  x       = tf.layers.conv2d({filters: c2, kernelSize: 3, activation: 'relu', padding: 'valid'}).apply(x);
+  x       = tf.layers.flatten().apply(x);
+  var out = tf.layers.dense({units: nClasses, activation: 'softmax'}).apply(x);
+
+  myModel = tf.model({inputs: inp, outputs: out});
+  var lr  = parseFloat(document.getElementById('myLR').value) || 0.003;
+  myModel.compile({
+    optimizer: tf.train.adam(lr),
+    loss: 'categoricalCrossentropy',
+    metrics: ['accuracy']
+  });
+  myLog('Model built: input [1,' + melFrames + ',' + melBins + ',1]  classes=' + nClasses);
+  return myModel;
+}
+
+// ── [JS-6] Training loop ──────────────────────────────────────
+
+var mySnapshotValData = null;
+
+function mySnapshotValidationImages() {
+  var pct  = parseInt(document.getElementById('myValidationPct').value) || 10;
+  mySnapshotValData = [];
+  for (var ci = 0; ci < myNumClasses; ci++) {
+    var n    = myTrainData[ci].length;
+    var nVal = Math.floor(n * pct / 100);
+    for (var j = n - nVal; j < n; j++) {
+      mySnapshotValData.push({data: myTrainData[ci][j], label: ci});
+    }
+  }
+  myLog('Validation set: ' + mySnapshotValData.length + ' clips');
+}
+
+// [JS-6a] myGetBatch — pulls Float32Arrays from myTrainData
+function myGetBatch(batchSize) {
+  var melBins   = parseInt(document.getElementById('myMelBinsIn').value) || 40;
+  var melFrames = parseInt(document.getElementById('myMelFramesIn').value) || 32;
+  var nClasses  = myGetLabels().length;
+  var allSamples = [];
+  for (var ci = 0; ci < myNumClasses; ci++) {
+    for (var j = 0; j < myTrainData[ci].length; j++) {
+      allSamples.push({data: myTrainData[ci][j], label: ci});
+    }
+  }
+  // shuffle
+  for (var i = allSamples.length - 1; i > 0; i--) {
+    var j = Math.floor(Math.random() * (i + 1));
+    var tmp = allSamples[i]; allSamples[i] = allSamples[j]; allSamples[j] = tmp;
+  }
+  var batch = allSamples.slice(0, batchSize);
+  var xs    = tf.tensor4d(batch.map(s => Array.from(s.data)), [batch.length, melFrames, melBins, 1]);
+  var ys    = tf.oneHot(tf.tensor1d(batch.map(s => s.label), 'int32'), nClasses);
+  return {xs, ys};
+}
+
+async function myStartTraining() {
+  var total = myTrainData.reduce((s, a) => s + a.length, 0);
+  if (total < myNumClasses * 2) {
+    myLog('Not enough clips. Need at least 2 per class. Use Force Train or collect more.');
+    return;
+  }
+  await myDoTrain();
+}
+
+async function myForceStartTraining() {
+  await myDoTrain();
+}
+
+async function myDoTrain() {
+  if (myIsTraining) return;
+  myIsTraining = true;
+  myTrainAbort = false;
+  myLossHistory = [];
+  myAccHistory  = [];
+  myBuildModel();
+  mySnapshotValidationImages();
+
+  var epochs    = parseInt(document.getElementById('myTargetEpochs').value) || 20;
+  var batchSize = parseInt(document.getElementById('myBatchSize').value) || 12;
+  var total     = myTrainData.reduce((s, a) => s + a.length, 0);
+
+  myLog('Browser training start: ' + total + ' clips  epochs=' + epochs);
+  document.getElementById('myTotalEpochs').textContent = epochs;
+
+  var melBins   = parseInt(document.getElementById('myMelBinsIn').value) || 40;
+  var melFrames = parseInt(document.getElementById('myMelFramesIn').value) || 32;
+  var nClasses  = myGetLabels().length;
+  var allSamples = [];
+  for (var ci = 0; ci < myNumClasses; ci++) {
+    for (var j = 0; j < myTrainData[ci].length; j++) {
+      allSamples.push({data: myTrainData[ci][j], label: ci});
+    }
+  }
+
+  var pct     = parseInt(document.getElementById('myValidationPct').value) || 10;
+  var nVal    = Math.floor(allSamples.length * pct / 100);
+  var valSet  = allSamples.slice(allSamples.length - nVal);
+  var trainSet = allSamples.slice(0, allSamples.length - nVal);
+
+  for (var ep = 0; ep < epochs && !myTrainAbort; ep++) {
+    // shuffle
+    for (var i = trainSet.length - 1; i > 0; i--) {
+      var j2 = Math.floor(Math.random() * (i + 1));
+      var tmp = trainSet[i]; trainSet[i] = trainSet[j2]; trainSet[j2] = tmp;
+    }
+    var totalLoss = 0; var correct = 0; var batches = 0;
+    for (var b = 0; b < trainSet.length; b += batchSize) {
+      var chunk = trainSet.slice(b, b + batchSize);
+      var xs = tf.tensor4d(chunk.map(s => Array.from(s.data)), [chunk.length, melFrames, melBins, 1]);
+      var ys = tf.oneHot(tf.tensor1d(chunk.map(s => s.label), 'int32'), nClasses);
+      var result = await myModel.trainOnBatch(xs, ys);
+      totalLoss += result[0]; batches++;
+      xs.dispose(); ys.dispose();
+      await tf.nextFrame();
+    }
+    var avgLoss = totalLoss / Math.max(1, batches);
+    // Val accuracy
+    var valAcc = 0;
+    if (valSet.length > 0) {
+      var vxs = tf.tensor4d(valSet.map(s => Array.from(s.data)), [valSet.length, melFrames, melBins, 1]);
+      var preds = myModel.predict(vxs);
+      var predArr = await preds.argMax(-1).array();
+      var trueArr = valSet.map(s => s.label);
+      valAcc = predArr.filter((p, idx) => p === trueArr[idx]).length / valSet.length;
+      vxs.dispose(); preds.dispose();
+    }
+    document.getElementById('myEpochNum').textContent  = ep + 1;
+    document.getElementById('myLossVal').textContent   = avgLoss.toFixed(4);
+    document.getElementById('myAccVal').textContent    = (valAcc * 100).toFixed(1) + '%';
+    document.getElementById('myEpochBarFill').style.width = Math.round((ep + 1) / epochs * 100) + '%';
+    myLossHistory.push(avgLoss);
+    myAccHistory.push(valAcc);
+    myDrawLossChart();
+    myUpdateConfusionMatrix();
+    myLog('Ep ' + (ep + 1) + '/' + epochs + '  loss=' + avgLoss.toFixed(4) + '  val=' + (valAcc * 100).toFixed(1) + '%');
+    await tf.nextFrame();
+  }
+  myIsTrained = true;
+  myIsTraining = false;
+  myLog('Browser training complete');
+}
+
+function myDrawLossChart() {
+  var c   = document.getElementById('myLossCanvas');
+  var ctx = c.getContext('2d');
+  ctx.fillStyle = '#0a0a0a';
+  ctx.fillRect(0, 0, c.width, c.height);
+  if (myLossHistory.length < 2) return;
+  var maxL = Math.max(...myLossHistory);
+  ctx.strokeStyle = '#f84';
+  ctx.lineWidth   = 1.5;
+  ctx.beginPath();
+  myLossHistory.forEach((v, i) => {
+    var x = i / (myLossHistory.length - 1) * c.width;
+    var y = c.height - v / maxL * (c.height - 8) - 4;
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+  ctx.strokeStyle = '#3a8';
+  ctx.beginPath();
+  myAccHistory.forEach((v, i) => {
+    var x = i / (myAccHistory.length - 1) * c.width;
+    var y = c.height - v * (c.height - 8) - 4;
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+}
+
+// [JS-6b] myUpdateInferenceDisplay — bar chart for classification
+function myUpdateInferenceDisplay(labelStr, conf, allProbs) {
+  var labels = myGetLabels();
+  var barsEl = document.getElementById('myInferBars');
+  var html   = '';
+  if (allProbs) {
+    for (var i = 0; i < labels.length; i++) {
+      var pct = Math.round(allProbs[i] * 100);
+      html += '<div class="infer-row"><span class="infer-label">' + labels[i] + '</span>' +
+              '<div class="bar-wrap"><div class="bar-fill" style="width:' + pct + '%;"></div></div>' +
+              '<span style="font-size:11px;">' + pct + '%</span></div>';
+    }
+  } else if (labelStr !== null) {
+    // Single INFER: line from device — show only winner bar
+    var pct = Math.round(conf * 100);
+    html = '<div class="infer-row"><span class="infer-label">' + labelStr + '</span>' +
+           '<div class="bar-wrap"><div class="bar-fill" style="width:' + pct + '%;"></div></div>' +
+           '<span style="font-size:11px;">' + pct + '%</span></div>';
+    document.getElementById('myInferLabel').textContent = '🎤 ' + labelStr + '  ' + pct + '%';
+  }
+  barsEl.innerHTML = html;
+}
+
+// Browser inference from mic
+async function myBrowserInfer() {
+  if (!myIsTrained || !myModel) { myLog('Train first'); return; }
+  var spec = await myGetCurrentSpectrogram();
+  if (!spec) { myLog('Start mic first'); return; }
+  var melBins   = parseInt(document.getElementById('myMelBinsIn').value) || 40;
+  var melFrames = parseInt(document.getElementById('myMelFramesIn').value) || 32;
+  var xs        = tf.tensor4d(Array.from(spec), [1, melFrames, melBins, 1]);
+  var pred      = myModel.predict(xs);
+  var probs     = await pred.data();
+  xs.dispose(); pred.dispose();
+  var best  = probs.indexOf(Math.max(...probs));
+  var labels = myGetLabels();
+  myUpdateInferenceDisplay(labels[best], probs[best], Array.from(probs));
+}
+
+// [JS-6c] Browser heatmap — stub (non-vision model)
+function myGetBrowserHeatmap() { return null; }
+
+// [JS-6d] Confusion matrix
+function myUpdateConfusionMatrix() {
+  if (!myModel || !mySnapshotValData || mySnapshotValData.length === 0) return;
+  var nC     = myGetLabels().length;
+  var melBins   = parseInt(document.getElementById('myMelBinsIn').value) || 40;
+  var melFrames = parseInt(document.getElementById('myMelFramesIn').value) || 32;
+  tf.tidy(() => {
+    var xs = tf.tensor4d(mySnapshotValData.map(s => Array.from(s.data)),
+                         [mySnapshotValData.length, melFrames, melBins, 1]);
+    var preds  = myModel.predict(xs).argMax(-1).arraySync();
+    var trues  = mySnapshotValData.map(s => s.label);
+    var matrix = Array.from({length: nC}, () => Array(nC).fill(0));
+    preds.forEach((p, i) => { if (trues[i] < nC && p < nC) matrix[trues[i]][p]++; });
+    var labels = myGetLabels();
+    var html   = '<table style="border-collapse:collapse;font-size:11px;">';
+    html += '<tr><td style="padding:2px 4px;color:#888;">True↓ Pred→</td>';
+    for (var j = 0; j < nC; j++) html += '<td style="padding:2px 4px;color:#aaa;">' + (labels[j] || j) + '</td>';
+    html += '</tr>';
+    for (var i = 0; i < nC; i++) {
+      html += '<tr><td style="padding:2px 4px;color:#aaa;">' + (labels[i] || i) + '</td>';
+      for (var j = 0; j < nC; j++) {
+        var v   = matrix[i][j];
+        var bg  = i === j ? (v > 0 ? '#183818' : '#181818') : (v > 0 ? '#381818' : '#181818');
+        html += '<td style="padding:2px 8px;background:' + bg + ';text-align:center;">' + v + '</td>';
+      }
+      html += '</tr>';
+    }
+    html += '</table>';
+    document.getElementById('myConfusionMatrix').innerHTML = html;
+  });
+}
+
+// ── [JS-7] Export / Config ────────────────────────────────────
+
+function myRefreshConfigTextarea() {
+  var labels = myGetLabels();
+  var cfg = {
+    firmwareVersion : parseInt(document.getElementById('myCfgFwVersion').value) || 14,
+    numClasses      : myNumClasses,
+    classLabels     : labels,
+    inputSize       : (parseInt(document.getElementById('myCfgMelBins').value) || 40) *
+                      (parseInt(document.getElementById('myCfgMelFrames').value) || 32),
+    conv1Filters    : parseInt(document.getElementById('myCfgConv1').value) || 4,
+    conv2Filters    : parseInt(document.getElementById('myCfgConv2').value) || 8,
+    useAugmentation : document.getElementById('myCfgUseAugmentation').checked,
+    grayscale       : document.getElementById('myCfgUseGrayscale').checked,
+    validationPct   : parseInt(document.getElementById('myCfgValidationPct').value) || 10,
+    // [JS-7b] Sound-specific config fields (match firmware mySaveConfig())
+    sampleRate      : parseInt(document.getElementById('myCfgSampleRate').value) || 16000,
+    melBins         : parseInt(document.getElementById('myCfgMelBins').value) || 40,
+    melFrames       : parseInt(document.getElementById('myCfgMelFrames').value) || 32,
+    fftSize         : parseInt(document.getElementById('myCfgFftSize').value) || 512,
+    vadThreshold    : parseInt(document.getElementById('myCfgVadThreshold').value) || 500,
+    vadWindowMs     : parseInt(document.getElementById('myCfgVadWindowMs').value) || 100
+  };
+  document.getElementById('myConfigTextarea').value = JSON.stringify(cfg, null, 2);
+}
+
+// [JS-7c] myApplyConfigJson
+function myApplyConfigJson(jsonStr) {
+  try {
+    var cfg = JSON.parse(jsonStr);
+    if (cfg.numClasses && cfg.numClasses !== myNumClasses) {
+      myReinitClassData(cfg.numClasses);
+      document.getElementById('myNumClassesSel').value = cfg.numClasses;
+      myRenderClassRows();
+      myRenderSerialButtons();
+    }
+    // Apply labels
+    if (cfg.classLabels) {
+      cfg.classLabels.forEach((lbl, i) => {
+        var el = document.getElementById('myLabel' + i);
+        if (el) el.value = lbl;
+      });
+    }
+    // Apply sound-specific fields
+    if (cfg.sampleRate)    document.getElementById('myCfgSampleRate').value   = cfg.sampleRate;
+    if (cfg.melBins)       { document.getElementById('myCfgMelBins').value   = cfg.melBins;
+                             document.getElementById('myMelBinsIn').value     = cfg.melBins; }
+    if (cfg.melFrames)     { document.getElementById('myCfgMelFrames').value = cfg.melFrames;
+                             document.getElementById('myMelFramesIn').value   = cfg.melFrames; }
+    if (cfg.fftSize)       { document.getElementById('myCfgFftSize').value   = cfg.fftSize;
+                             document.getElementById('myFftSizeSel').value    = cfg.fftSize; }
+    if (cfg.vadThreshold)  { document.getElementById('myCfgVadThreshold').value = cfg.vadThreshold;
+                             document.getElementById('myVadThreshIn').value    = cfg.vadThreshold; }
+    if (cfg.vadWindowMs)   { document.getElementById('myCfgVadWindowMs').value = cfg.vadWindowMs;
+                             document.getElementById('myVadWindowIn').value    = cfg.vadWindowMs; }
+    if (cfg.conv1Filters)  { document.getElementById('myCfgConv1').value      = cfg.conv1Filters;
+                             document.getElementById('myConv1FiltersIn').value = cfg.conv1Filters; }
+    if (cfg.conv2Filters)  { document.getElementById('myCfgConv2').value      = cfg.conv2Filters;
+                             document.getElementById('myConv2FiltersIn').value = cfg.conv2Filters; }
+    if (cfg.validationPct !== undefined) document.getElementById('myCfgValidationPct').value = cfg.validationPct;
+    myUpdateEpochHint();
+    myRefreshConfigTextarea();
+    myLog('Config applied');
+  } catch(e) {
+    myLog('Config parse error: ' + e);
+  }
+}
+
+function myLoadConfigFromTextarea() {
+  myApplyConfigJson(document.getElementById('myConfigTextarea').value);
+}
+
+function myExportConfigJson() {
+  myRefreshConfigTextarea();
+  var blob = new Blob([document.getElementById('myConfigTextarea').value], {type: 'application/json'});
+  var a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+  a.download = 'config.json'; a.click();
+}
+
+// [JS-7a] myExportBin — exports model weights as flat binary matching firmware weight layout
+async function myExportBin() {
+  if (!myModel) { myLog('Build/train model first'); return; }
+  var weights = myModel.getWeights();
+  var parts   = [];
+  for (var w of weights) { parts.push(await w.data()); }
+  // Pack all into one Float32Array
+  var total = parts.reduce((s, a) => s + a.length, 0);
+  var buf   = new Float32Array(total);
+  var off   = 0;
+  for (var p of parts) { buf.set(p, off); off += p.length; }
+  // Prepend JSON header matching mySaveConfig fields
+  var cfg  = JSON.parse(document.getElementById('myConfigTextarea').value);
+  var header = JSON.stringify(cfg);
+  var headerBytes = new TextEncoder().encode(header);
+  var headerLen   = new Uint32Array([headerBytes.length]);
+  var final = new Uint8Array(4 + headerBytes.length + buf.buffer.byteLength);
+  final.set(new Uint8Array(headerLen.buffer), 0);
+  final.set(headerBytes, 4);
+  final.set(new Uint8Array(buf.buffer), 4 + headerBytes.length);
+  var blob = new Blob([final], {type: 'application/octet-stream'});
+  var a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+  a.download = 'myWeights.bin'; a.click();
+  myLog('myWeights.bin exported (' + final.length + ' bytes)');
+}
+
+// [JS-7d] myLoadWeightsBinFromLines — load weights from raw binary (no header)
+async function myLoadWeightsBinFromLines() {
+  if (!myModel) myBuildModel();
+  var input = document.createElement('input');
+  input.type = 'file'; input.accept = '.bin';
+  input.onchange = async (e) => {
+    var file = e.target.files[0];
+    await myLoadWeightsBinFromBytes(await file.arrayBuffer());
+    myLog('Weights loaded from file: ' + file.name);
+  };
+  input.click();
+}
+
+async function myLoadWeightsBinFromBytes(ab) {
+  if (!myModel) myBuildModel();
+  // Check for header prefix
+  var view = new DataView(ab);
+  var offset = 0;
+  if (ab.byteLength > 4) {
+    var headerLen = view.getUint32(0, true);
+    if (headerLen > 0 && headerLen < ab.byteLength - 4) {
+      var headerBytes = new Uint8Array(ab, 4, headerLen);
+      var headerStr   = new TextDecoder().decode(headerBytes);
+      try { myApplyConfigJson(headerStr); } catch(e) {}
+      offset = 4 + headerLen;
+    }
+  }
+  var floatData = new Float32Array(ab, offset);
+  var wList     = myModel.getWeights();
+  var pos       = 0;
+  var newWeights = [];
+  for (var w of wList) {
+    var sz = w.size;
+    var slice = floatData.slice(pos, pos + sz);
+    newWeights.push(tf.tensor(Array.from(slice), w.shape));
+    pos += sz;
+  }
+  myModel.setWeights(newWeights);
+  newWeights.forEach(t => t.dispose());
+  myIsTrained = true;
+  myLog('Weights applied to browser model');
+}
+
+// ── [JS-7] SD transfer functions (v78 binary protocol) ────────
+
+async function mySendFile(sdPath, uint8Array) {
+  return new Promise(async (resolve, reject) => {
+    myFileTransferResolve = resolve;
+    myFileTransferReject  = reject;
+    var totalBytes = uint8Array.length;
+    mySendCmd('FILE_SEND_START:' + sdPath + ':' + totalBytes);
+    // Wait for OK:FILE_READY
+    await new Promise(r => setTimeout(r, 300));
+    var chunkSize = 256;
+    for (var i = 0; i < totalBytes; i += chunkSize) {
+      var chunk   = uint8Array.slice(i, i + chunkSize);
+      var xorVal  = 0;
+      for (var b of chunk) xorVal ^= b;
+      var hexStr  = Array.from(chunk).map(b => b.toString(16).padStart(2, '0')).join('');
+      var idx     = Math.floor(i / chunkSize);
+      var ackLine = await new Promise((res) => {
+        myFileTransferResolve = res;
+        mySendCmd('FILE_CHUNK:' + idx + ':' + xorVal.toString(16).padStart(2, '0') + ':' + hexStr);
+      });
+      if (ackLine && ackLine.startsWith('ERR:CHUNK_RETRY')) {
+        // Retry once
+        var retryAck = await new Promise((res) => {
+          myFileTransferResolve = res;
+          mySendCmd('FILE_CHUNK:' + idx + ':' + xorVal.toString(16).padStart(2, '0') + ':' + hexStr);
+        });
+      }
+    }
+    myFileTransferResolve = resolve;
+    mySendCmd('FILE_SEND_END:' + totalBytes);
+  });
+}
+
+async function mySendChunkedText(sdPath, text) {
+  var bytes = new TextEncoder().encode(text);
+  return mySendFile(sdPath, bytes);
+}
+
+async function myExportBinToSd() {
+  if (!myModel) { myLog('No model to export'); return; }
+  var weights = myModel.getWeights();
+  var parts   = [];
+  for (var w of weights) parts.push(await w.data());
+  var total = parts.reduce((s, a) => s + a.length, 0);
+  var buf   = new Float32Array(total);
+  var off   = 0;
+  for (var p of parts) { buf.set(p, off); off += p.length; }
+  myLog('Sending myWeights.bin to SD...');
+  await mySendFile('/header/myWeights.bin', new Uint8Array(buf.buffer));
+  myLog('myWeights.bin sent to SD');
+}
+
+async function myExportConfigJsonToSd() {
+  myRefreshConfigTextarea();
+  var text = document.getElementById('myConfigTextarea').value;
+  myLog('Sending config.json to SD...');
+  await mySendChunkedText('/header/config.json', text);
+  myLog('config.json sent to SD');
+}
+
+async function mySaveBothToSd() {
+  await myExportBinToSd();
+  await myExportConfigJsonToSd();
+  myLog('Both files sent to SD');
+}
+
+// Bulk xfer
+async function myXferPickFolder() {
+  try {
+    myXferFolder = await window.showDirectoryPicker({mode: 'read'});
+    myLog('Xfer folder set: ' + myXferFolder.name);
+  } catch(e) { myLog('Pick cancelled'); }
+}
+
+async function mySendAllToSd() {
+  if (!myXferFolder) { myLog('Pick folder first'); return; }
+  myXferAbortFlag = false;
+  var labels  = myGetLabels();
+  var status  = document.getElementById('myXferStatus');
+  try {
+    var audioDir = await myXferFolder.getDirectoryHandle('audio').catch(() => myXferFolder);
+    for (var ci = 0; ci < myNumClasses && !myXferAbortFlag; ci++) {
+      try {
+        var classDir = await audioDir.getDirectoryHandle(labels[ci]);
+        for await (var [name, fh] of classDir.entries()) {
+          if (myXferAbortFlag) break;
+          var file    = await fh.getFile();
+          var ab      = await file.arrayBuffer();
+          var sdPath  = '/audio/' + labels[ci] + '/' + name;
+          status.textContent = 'Sending: ' + sdPath;
+          await mySendFile(sdPath, new Uint8Array(ab));
+        }
+      } catch(e2) {}
+    }
+  } catch(e) { myLog('Xfer error: ' + e); }
+  status.textContent = myXferAbortFlag ? 'Aborted' : 'Send complete';
+}
+
+async function myXferReceiveAllFromSd() {
+  myLog('Receive from SD: use SD_LIST and SD_READ per file (bulk receive not yet implemented)');
+}
+
+function myXferAbort() { myXferAbortFlag = true; }
+
+// ── [JS-8] Heatmap stubs (non-vision) ────────────────────────
+function myToggleHeatmapLive()    { /* stub — no heatmap for audio model */ }
+function myToggleBrowserHeatmap() { /* stub */ }
+function myRenderHeatmap()        { /* stub */ }
+
+// ── WebSerial core ────────────────────────────────────────────
+
+async function myConnect() {
+  try {
+    myPort   = await navigator.serial.requestPort();
+    await myPort.open({baudRate: 115200});
+    var td   = new TextDecoderStream();
+    myPort.readable.pipeTo(td.writable);
+    myReader = td.readable.getReader();
+    var te   = new TextEncoderStream();
+    te.readable.pipeTo(myPort.writable);
+    myWriter = te.writable.getWriter();
+    document.getElementById('myConnStatus').textContent  = '● Connected';
+    document.getElementById('myConnStatus').className    = 'connected';
+    myLog('Connected');
+    myReadLoop();
+  } catch(e) {
+    myLog('Connect error: ' + e.message);
+  }
+}
+
+async function myDisconnect() {
+  try {
+    if (myReader) await myReader.cancel();
+    if (myWriter) await myWriter.close();
+    if (myPort)   await myPort.close();
+  } catch(e) {}
+  myPort = null; myReader = null; myWriter = null;
+  document.getElementById('myConnStatus').textContent = '● Disconnected';
+  document.getElementById('myConnStatus').className   = 'disconnected';
+  myLog('Disconnected');
+}
+
+async function mySendCmd(cmd) {
+  if (!myWriter) { myLog('Not connected'); return; }
+  try { await myWriter.write(cmd + '\n'); } catch(e) { myLog('Send error: ' + e); }
+}
+
+function mySendRaw() {
+  var val = document.getElementById('myRawCmd').value.trim();
+  if (val) mySendCmd(val);
+}
+
+function mySerialClearSelected() { /* clears any serial button highlight state */ }
+
+// ── Class rows & serial buttons rendering ────────────────────
+
+function myRenderClassRows() {
+  var labels = ['0Silence', '1Yes', '2No', '3Word1', '4Word2', '5Word3', '6Word4', '7Word5'];
+  var html   = '<tr style="background:#1a1a1a;"><th style="text-align:left;padding:2px 4px;">Label</th>' +
+               '<th>Clips on SD</th><th>Clips in Browser</th><th>Record on Device</th></tr>';
+  for (var i = 0; i < myNumClasses; i++) {
+    var defaultLabel = labels[i] || ('' + i);
+    html += '<tr class="class-row">' +
+      '<td><input type="text" id="myLabel' + i + '" value="' + defaultLabel + '" class="wide" ' +
+      'onchange="myRenderSerialButtons(); myRefreshConfigTextarea()"></td>' +
+      '<td id="myCount' + i + '" style="text-align:center;">0</td>' +
+      '<td id="myBrowserCount' + i + '" style="text-align:center;">' + (myTrainData[i] ? myTrainData[i].length : 0) + '</td>' +
+      '<td>' + myGetCaptureButtonHtml(i) + '</td>' +
+      '</tr>';
+  }
+  document.getElementById('myClassTable').innerHTML = html;
+}
+
+// [HTML-5d] myGetCaptureButtonHtml — Record button per class
+function myGetCaptureButtonHtml(i) {
+  return '<button onclick="myCollect(' + i + ')">🎤 Record</button>';
+}
+
+function myRenderSerialButtons() {
+  var labels = myGetLabels();
+  var html   = '';
+  // Class buttons
+  for (var i = 0; i < myNumClasses; i++) {
+    html += '<button onclick="mySerialClearSelected(); mySendCmd(\'' + i + '\')" ' +
+            'title="Navigate to class ' + i + '">' + (labels[i] || i) + '</button> ';
+  }
+  // Train / Infer nav buttons
+  html += '<button onclick="mySerialClearSelected(); mySendCmd(\'t\')" title="Next menu item">⏩ Next</button> ';
+  html += '<button onclick="mySerialClearSelected(); mySendCmd(\'' + (myNumClasses + 1) + '\')" title="Start training on device">🏋 Train</button> ';
+  html += '<button onclick="mySerialClearSelected(); mySendCmd(\'' + (myNumClasses + 2) + '\')" title="Start inference on device">🔍 Infer</button>';
+  document.getElementById('mySerialButtons').innerHTML = html;
+}
+
+function myOnNumClassesChange(n) {
+  myReinitClassData(n);
+  myRenderClassRows();
+  myRenderSerialButtons();
+  myRefreshConfigTextarea();
+  myUpdateRamHint();
+}
+
+// ── [JS-9] Init ───────────────────────────────────────────────
+
+window.addEventListener('load', function() {
+  myReinitClassData(3);
+  myRenderClassRows();
+  myRenderSerialButtons();
+  myUpdateEpochHint();
+  myUpdateRamHint();
+  myRefreshConfigTextarea();
+  myUpdateValBox();
+
+  // Sound-specific startup: check for browser mic support
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    myLog('⚠️ getUserMedia not supported in this browser — mic preview unavailable');
+  }
+  if (!navigator.serial) {
+    myLog('⚠️ WebSerial not supported — use Chrome/Edge with HTTPS or localhost');
+  }
+
+  myLog('webmcu-sound-web v14 ready');
+  myLog('Connect to XIAO ESP32-S3 then use buttons or type STATUS');
+});
+</script>
+</body>
+</html>
