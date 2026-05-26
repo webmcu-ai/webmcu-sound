@@ -1,0 +1,1578 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>XIAO ML Kit Sound/Wake-Word Classification Training over WebSerial. v14</title>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0"></script>
+<style>
+table td, table th { padding: 10px; }
+.myProgWrap  { height: 8px; background: #ddd; border-radius: 4px; margin: 8px 0; overflow: hidden; }
+.myProgBar   { height: 100%; background: #0088cc; width: 0%; transition: width .2s; }
+.mySdList { border: 1px solid #ccc; border-radius: 4px; min-height: 80px; max-height: 240px; overflow-y: auto; background: #fafafa; font-family: monospace; font-size: 0.82em; }
+.mySdEntry { display: flex; align-items: center; gap: 8px; padding: 5px 10px; border-bottom: 1px solid #eee; cursor: pointer; user-select: none; }
+.mySdEntry:hover { background: #e8f4ff; }
+.mySdEntry.mySdSelected { background: #cce8ff; }
+.mySdEntryDir .mySdName { color: #885500; }
+.mySdName { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mySdSize { color: #888; font-size: 0.75em; flex-shrink: 0; }
+.mySdBreadcrumb { font-family: monospace; font-size: 0.82em; padding: 4px 6px; background: #f0f0f0; border-radius: 3px; margin-bottom: 4px; }
+.mySdBcItem { color: #0055aa; cursor: pointer; }
+.mySdBcItem:hover { text-decoration: underline; }
+#myWaveCanvas   { border: 1px solid #ccc; background: #111; display: block; }
+#mySpectroCanvas{ border: 1px solid #ccc; background: #111; display: block; margin-top: 4px; }
+.myMicLevelWrap { height: 10px; background: #ddd; border-radius: 5px; overflow: hidden; width: 200px; display: inline-block; vertical-align: middle; }
+.myMicLevelBar  { height: 100%; background: #0088cc; width: 0%; transition: width 0.05s; }
+.myInferRow { display: flex; align-items: center; gap: 8px; margin: 3px 0; }
+.myInferLabel { width: 90px; font-family: monospace; font-size: 0.85em; white-space: nowrap; overflow: hidden; }
+.myInferBarWrap { flex: 1; height: 14px; background: #ddd; border-radius: 3px; overflow: hidden; }
+.myInferBarFill { height: 100%; background: #0088cc; transition: width 0.15s; }
+.myInferPct { width: 40px; font-size: 0.82em; text-align: right; }
+</style>
+</head>
+<body>
+
+<h1 align=center>🎤 XIAO ML Kit Sound/Wake-Word Classification Training over WebSerial. v14</h1>
+<p>Train a 2-layer Audio CNN (Mel spectrogram) in the browser · Record clips via browser mic OR on-device PDM mic · Export weights to SD card · WebSerial ESP32 control</p>
+<p>Needs Chrome or Edge browser for WebSerial. Probably best not to use a cell phone.</p><br>
+<p>Repo: <a href="https://github.com/webmcu-ai/webmcu-sound-web" target="_blank">github.com/webmcu-ai/webmcu-sound-web</a> &nbsp;|&nbsp;
+  Paper 1: <a href="https://arxiv.org/abs/2604.23012" target="_blank">arXiv:2604.23012</a> &nbsp;|&nbsp;
+  Paper 2: <a href="https://arxiv.org/abs/2604.22834" target="_blank">arXiv:2604.22834</a></p>
+<p>Seeedstudio XIAO ML Kit: <a href="https://www.seeedstudio.com/The-XIAOML-Kit.html" target="_blank">www.seeedstudio.com/The-XIAOML-Kit.html</a></p>
+<p>Sponsor a TinyML Hardware kit at <a href="https://opencollective.com/mlsysbook" target="_blank">opencollective.com/mlsysbook</a> to support universities in the Global South</p>
+<br><hr><br>
+
+<div id="myCodeSpace">
+<table border=1>
+<tr><td valign=top>
+
+<!-- ═══ SECTION 1 — WEBSERIAL & SD BROWSER ═══ -->
+<div id="mySerialTile" style="position:relative;border:1px solid black;background:white;display:flex;flex-direction:column;overflow:hidden;">
+<div onmousedown="myStartDragging(event,'mySerialTile')" style="background:#ccc;cursor:move;user-select:none;padding:5px;font-weight:bold;">
+<h2>1 · ESP32 WebSerial &amp; SD Browser</h2>
+<p>Connect your XIAO ESP32S3 Sense via USB · Chrome/Edge · USB CDC On Boot: Enabled</p>
+<div id="mySerialStatus" style="font-weight:bold;">Not Connected</div><br>
+<button onclick="myConnectSerial()">Connect ESP32</button>
+<button onclick="myDisconnectSerial()">Disconnect</button>
+<br><br>
+<label>Send command:</label>
+<input type="text" id="mySerialCmd" placeholder="type command + Enter" onkeydown="if(event.key==='Enter') mySendSerialLine()">
+<button onclick="mySendSerialLine()">Send</button>
+<br>
+<small>
+  <button onclick="mySerialClearSelected();mySendSerialChar('t')">t=Next</button>
+  <button onclick="mySerialClearSelected();mySendSerialChar('l')">l=Select</button>
+  <span id="mySerialClassBtns"></span>
+  <button id="mySerialTrainBtn"></button>
+  <button id="mySerialInferBtn"></button>
+</small>
+<br>
+<small><b>Sound:</b>
+  <button onclick="mySerialClearSelected();mySendSerialLine2('RECORD_STOP')">⏹ Record Stop</button>
+  <button onclick="mySerialClearSelected();mySendSerialLine2('RECORD_STATUS')">❓ Status</button>
+  <button onclick="mySerialClearSelected();mySendSerialLine2('STATUS')">ℹ️ Device Status</button>
+  <button onclick="mySerialClearSelected();mySendSerialLine2('SAVE_WEIGHTS')">💾 Save Weights</button>
+  <button onclick="mySerialClearSelected();mySendSerialLine2('LOAD_WEIGHTS')">📥 Load Weights</button>
+</small>
+<br><br>
+<b>Serial Monitor</b><br>
+<pre id="mySerialLog" style="height:160px;overflow-y:auto;font-family:monospace;background:#1e1e1e;color:#d4d4d4;padding:6px;font-size:0.82em;margin:0;border:1px solid #555;border-radius:3px;resize:vertical;white-space:pre-wrap;word-break:break-all;">Serial output will appear here...
+</pre>
+<button onclick="document.getElementById('mySerialLog').textContent='Serial output will appear here...\n'">Clear Log</button>
+<button onclick="navigator.clipboard.writeText(document.getElementById('mySerialLog').textContent).then(()=>myLog('Log copied')).catch(e=>myLog('Copy failed'))">📋 Copy Log</button>
+<label><input type="checkbox" id="mySerialAutoScroll" checked> Auto-scroll</label> Note: Drag the gray area.
+<br><br>
+</div>
+<div onmousedown="myStartResizing(event,'mySerialTile')" title="Drag to resize" style="position:absolute;bottom:0;right:0;width:18px;height:18px;cursor:nwse-resize;display:flex;align-items:flex-end;justify-content:flex-end;line-height:1;font-size:14px;color:#888;user-select:none;">⊿</div>
+</div>
+
+<h2>Decisions Before Training</h2>
+<p>The defaults have been fully tested. Set BEFORE training.</p>
+
+<label><b>Number of Classes:</b></label>
+<select id="myNumClassesSelect" onchange="myOnNumClassesChange(this.value)">
+  <option value="2">2</option><option value="3" selected>3</option><option value="4">4</option>
+  <option value="5">5</option><option value="6">6</option><option value="7">7</option><option value="8">8</option>
+</select>
+<p style="margin:2px 0 8px 0;font-size:0.82em;color:#555;">⚠ Changing classes resets all audio buffers.</p>
+
+<b>Sound Model Parameters:</b><br>
+<label>Sample Rate:</label>
+<select id="mySampleRateSel"><option value="16000" selected>16000 Hz</option></select>
+&nbsp;<label>Mel Bins:</label>
+<input type="number" id="myMelBinsIn" value="40" min="16" max="64" style="width:50px" onchange="myUpdateEpochHint();myRefreshConfigTextarea()">
+&nbsp;<label>Mel Frames:</label>
+<input type="number" id="myMelFramesIn" value="32" min="16" max="64" style="width:50px" onchange="myUpdateEpochHint();myRefreshConfigTextarea()">
+<br>
+<label>FFT Size:</label>
+<select id="myFftSizeSel" onchange="myRefreshConfigTextarea()">
+  <option value="256">256</option><option value="512" selected>512</option><option value="1024">1024</option>
+</select>
+&nbsp;<label>Conv1 Filters:</label>
+<input type="number" id="myConv1FiltersIn" value="4" min="2" max="32" style="width:50px">
+&nbsp;<label>Conv2 Filters:</label>
+<input type="number" id="myConv2FiltersIn" value="8" min="2" max="64" style="width:50px">
+<br>
+<div id="myResolutionHint" style="font-size:0.82em;color:#666;margin-top:4px;"></div>
+<br>
+Reminder to: <button style="background:#005500;color:#fff;font-weight:bold;font-size:1.05em;padding:8px 16px;" onclick="myPickSaveFolder()">📂 Choose Project Folder</button>
+<br><br>
+<label>RAM window per class (max clips in training buffer):</label>
+<input type="number" id="myMaxBufferInput" value="500" min="5" max="5000" onchange="myUpdateMaxBuffer()">
+<span id="myRamHint" style="font-size:0.82em;color:#666;margin-left:8px;"></span>
+<br>
+
+</td><td valign=top>
+
+<!-- ── SD Browser ── -->
+<b>SD Card Browser</b>
+<p>Browse, view, and delete files on the ESP32 SD card.</p>
+<div class="mySdBreadcrumb" id="mySdBreadcrumb">
+  <span class="mySdBcItem" onclick="mySdNavigate('/')">/  (root)</span>
+</div>
+<div class="mySdList" id="mySdList">
+  <div style="padding:12px;color:#888;">Connect ESP32 then press Refresh to browse SD card</div>
+</div>
+<br>
+<button onclick="mySdRefresh()">⟳ Refresh</button>
+<button id="mySdDeleteBtn" style="display:none;" onclick="mySdDeleteSelected()">🗑 Delete Selected</button>
+<button onclick="mySdGoUp()">↑ Up</button>
+<div id="mySdViewer" style="margin-top:8px;display:none;">
+  <b id="mySdViewerName" style="font-family:monospace;">—</b><br>
+  <textarea id="mySdViewerText" rows="8" cols="55" style="display:none;font-family:monospace;font-size:0.8em;" spellcheck="false"></textarea><br>
+  <button id="mySdSaveTextBtn" style="display:none;" onclick="mySdSaveTextFile()">💾 Save changes to SD</button>
+  <button id="mySdDownloadBtn" style="display:none;" onclick="mySdDownloadFile()">↓ Download to PC</button>
+</div>
+<br><hr><br>
+
+<!-- ═══ SECTION 2 — FILE & SD TRANSFER ═══ -->
+<h2>2 · File &amp; SD Transfer</h2>
+<b>PC Project Folder</b>
+<span id="myFolderStatus" style="margin-left:10px;font-size:0.85em;color:#888;">None — audio held in RAM only</span><br>
+<small style="color:#555;">Pick a project root folder — mirrors SD card: <code>root/audio/ClassName/</code> and <code>root/header/</code> created automatically.</small><br><br>
+<button onclick="myPickSaveFolder()">📂 Choose Project Folder</button>
+<button onclick="myForgetSaveFolder()" id="myForgetFolderBtn" style="display:none;">✕ Forget</button>
+<br><br>
+<b>Load Config &amp; Weights</b><br>
+<table border=1>
+<tr>
+  <td><button onclick="myLoadConfigFromFolder()">Load config.json from PC</button></td>
+  <td><button onclick="mySdReadConfig()">Load config.json from SD</button></td>
+  <td><small style="color:#555;">Restore class names and sound settings.</small></td>
+</tr>
+<tr>
+  <td><button onclick="myLoadModelFromFolder()">Load myWeights.bin from PC</button></td>
+  <td><button onclick="mySerialClearSelected();mySendSerialLine2('LOAD_WEIGHTS')">Load Weights from SD</button></td>
+  <td><small style="color:#555;">Loads ESP32 weight format into browser model.</small></td>
+</tr>
+<tr>
+  <td><button onclick="myPickAndLoadFolder()">Load all audio clips from PC</button></td>
+  <td><button onclick="myLog('Use Load from SD button per class in Section 3.')">Load all audio clips from SD</button></td>
+  <td><small style="color:#555;">PC: reads <code>audio/ClassName/*.wav</code> or <code>*.f32</code>.</small></td>
+</tr>
+</table>
+
+</td></tr><tr><td valign=top>
+
+<!-- ═══ SECTION 3 — MIC & DATA COLLECTION ═══ -->
+<div id="myMicTile" style="position:relative;border:1px solid black;background:white;display:flex;flex-direction:column;overflow:hidden;">
+<div onmousedown="myStartDragging(event,'myMicTile')" style="background:#ccc;cursor:move;user-select:none;padding:5px;font-weight:bold;">
+<h2>3 · Microphone &amp; Data Collection</h2>
+
+<b>Browser Mic (preview + browser-side recording):</b><br>
+<select id="myAudioDeviceSelect" style="max-width:260px;"></select><br><br>
+<button id="myMicStartBtn" onclick="myStartMic()">🎤 Start Browser Mic</button>
+<button id="myMicStopBtn" onclick="myStopMic()" style="display:none;">⏹ Stop Browser Mic</button>
+<br><br>
+<b>Waveform (browser mic):</b><br>
+<canvas id="myWaveCanvas" width="380" height="60"></canvas>
+<b>Mel Spectrogram Preview:</b><br>
+<canvas id="mySpectroCanvas" width="380" height="80" title="Scrolling spectrogram — lower bands at bottom, newest frame at right"></canvas>
+<br>
+<div style="display:flex;align-items:center;gap:8px;margin-top:4px;">
+  <span style="font-size:0.82em;">Mic level:</span>
+  <div class="myMicLevelWrap"><div id="myMicLevelBar" class="myMicLevelBar"></div></div>
+  <span id="myMicRms" style="font-size:0.82em;color:#555;"></span>
+</div>
+<p style="font-size:0.82em;color:#555;margin:6px 0 4px 0;">
+  <b>Browser mic recording</b> = captures 1 second via Web Audio API → computes Mel spectrogram → adds to training buffer. Auto-saves .f32 to PC folder if set.<br>
+  <b>Device recording</b> = sends RECORD_START to ESP32 → device captures 1s via PDM mic → saves WAV to SD card → COLLECT_COUNT updates counter.
+</p>
+<br>
+</div>
+<div onmousedown="myStartResizing(event,'myMicTile')" title="Drag to resize" style="position:absolute;bottom:0;right:0;width:18px;height:18px;cursor:nwse-resize;display:flex;align-items:flex-end;justify-content:flex-end;line-height:1;font-size:14px;color:#888;user-select:none;">⊿</div>
+</div>
+<br><br>
+
+<!-- Class capture rows (generated by myRenderClassRows) -->
+<div id="myClassRows"></div>
+<br>
+<p style="font-size:0.82em;color:#555;">
+  <b>🎤 Record on Device</b> = sends RECORD_START:N to ESP32 · device captures via PDM mic · saves WAV to SD<br>
+  <b>🎙 Record in Browser</b> = captures 1s via browser mic · computes Mel spectrogram · adds to training buffer · auto-saves .f32 to PC folder<br>
+  <b>Load from PC</b> = pick WAV or F32 files · <b>Load from SD</b> = pull WAV clips from SD via WebSerial · <b>Clear RAM</b> = free buffer only
+</p>
+
+<h3>Activity Log</h3>
+<div id="myDivHistory" style="height:200px;overflow-y:auto;font-family:monospace;background:#eee;padding:8px;font-size:0.85em;">Logs will appear here...</div>
+<button onclick="document.getElementById('myDivHistory').innerHTML=''">Clear Log</button>
+<br>
+
+</td><td valign=top>
+
+<!-- ═══ SECTION 4 — TRAINING PROGRESS ═══ -->
+<h2>4 · Training Progress</h2>
+Batches Trained: <span id="myEpochDisplay">0</span><br>
+Min Clips per Class: <input type="number" id="myMinSamples" value="5" min="1" max="100">
+<br><br>
+<label><input type="checkbox" id="myUseAllData" checked onchange="myToggleEpochMode()"> Use All Data (systematic epochs)</label><br>
+<div id="myEpochControls">
+  <label>Target Epochs:</label>
+  <input type="number" id="myTargetEpochs" value="30" min="0" step="1">
+  INCREASE TO TRAIN LONGER!
+  <p id="myEpochHint" style="font-size:0.82em;color:#666;"></p>
+</div>
+<div id="myBatchControls" style="display:none;">
+  <label>Max Batches:</label><input type="number" id="myMaxBatches" value="100" min="0">
+</div>
+<br>
+<label>Batch Size:</label><input type="number" id="myBatchSize" value="12" min="3" max="60" step="3"><br>
+<label>Learning Rate:</label><input type="number" id="myLearningRate" value="0.0003" min="0.00001" max="0.01" step="0.0001"><br>
+<br>
+Avg Loss: <span id="myLossDisplay">--</span><br>
+Status: <span id="myStatusDisplay">Waiting...</span><br>
+<br>
+<button onclick="myStartBrain()">▶ Start / Rebuild Brain</button>
+<button id="myPauseBtn" onclick="myPauseTraining()" disabled>Pause</button>
+<button id="myResumeBtn" onclick="myResumeTraining()" style="display:none;">Resume</button>
+<button onclick="myForceStartTraining()" style="background:#c07000;color:#fff;">⚡ Force Train</button>
+<br><br>
+<div style="height:10px;background:#ccc;border-radius:4px;overflow:hidden;">
+  <div id="myProgressBar" style="height:100%;background:green;width:0%;transition:width 0.2s;"></div>
+</div>
+<br>
+<div id="myOutputDisplay">Ready...</div>
+<button onclick="myBrowserInferNow()">🔍 Browser Infer (from mic)</button>
+<button id="myStopAnalysisBtn" onclick="myStopAnalysis()" disabled>Stop Analysis</button>
+<button id="myStartAnalysisBtn" onclick="myStartAnalysis()" style="display:none;">Start Analysis</button>
+<br><br>
+<h3>Confusion Matrix</h3>
+<button onclick="myUpdateConfusionMatrix()">Update Confusion Matrix</button>
+<div id="myConfusionMatrixContainer" style="margin-top:10px;font-family:monospace;"></div>
+<br>
+<label><input type="checkbox" id="myAutoSaveWeights"> Auto-save weights every 20 batches</label><br>
+<small style="color:#555;">Leave unchecked to protect a well-trained model.</small>
+<br><br>
+<b>Export to PC</b><br>
+<button onclick="myExportBin()">💾 myWeights.bin → PC</button>
+<button onclick="myExportConfigJson()">💾 config.json → PC</button>
+<br><br>
+<b>Send to SD Card</b><br>
+<button onclick="myExportConfigJsonToSd()" style="background:#0077bb;color:#fff;font-weight:bold;">📤 config.json → SD</button>
+<button onclick="myExportBinToSd()" style="background:#0077bb;color:#fff;font-weight:bold;">📤 myWeights.bin → SD</button>
+<br><br>
+<button onclick="mySaveBothToSd()" style="background:#005500;color:#fff;font-weight:bold;font-size:1.05em;padding:8px 16px;">📤📤 Send config.json + myWeights.bin → SD</button>
+<p style="font-size:0.82em;color:#555;">Sends both files to SD card /header/ folder via WebSerial (firmware v14 required).</p>
+<br>
+
+</td></tr><tr><td colspan=2>
+
+<!-- ═══ SECTION 5 — CONFIG EXPORT ═══ -->
+<h2>5 · ESP32 Export Settings &amp; config.json Editor</h2>
+<table><tr><td valign=top>
+
+<label>Firmware Version:</label>
+<input type="number" id="myBinVersion" value="14" min="1" onchange="myRefreshConfigTextarea()"><br><br>
+<label><input type="checkbox" id="myExportAugmentation" checked onchange="myRefreshConfigTextarea()"> useAugmentation</label><br>
+<label><input type="checkbox" id="myExportGrayscale" checked onchange="myRefreshConfigTextarea()"> grayscale/mono</label><br>
+<label>Validation:
+  <select id="myValidationPct" onchange="myUpdateValBox();myRefreshConfigTextarea();">
+    <option value="5">5%</option><option value="10" selected>10%</option>
+    <option value="15">15%</option><option value="20">20%</option>
+  </select>
+  of min class →
+  <input type="number" id="myExportValidationImages" value="2" min="1" max="999" style="width:55px;" onchange="myRefreshConfigTextarea();">
+  clips/class
+  <span id="myValHint" style="color:#888;font-size:0.82em;"></span>
+</label>
+<br><br>
+<b>Sound-specific fields (match firmware mySaveConfig):</b><br>
+<label>sampleRate: <input type="number" id="myCfgSampleRate" value="16000" style="width:80px" onchange="myRefreshConfigTextarea()"></label><br>
+<label>melBins: <input type="number" id="myCfgMelBins" value="40" style="width:60px" onchange="myRefreshConfigTextarea()"></label>
+<label>melFrames: <input type="number" id="myCfgMelFrames" value="32" style="width:60px" onchange="myRefreshConfigTextarea()"></label><br>
+<label>fftSize: <input type="number" id="myCfgFftSize" value="512" style="width:70px" onchange="myRefreshConfigTextarea()"></label>
+<label>vadThreshold: <input type="number" id="myCfgVadThreshold" value="500" style="width:70px" onchange="myRefreshConfigTextarea()"></label><br>
+<label>vadWindowMs: <input type="number" id="myCfgVadWindowMs" value="100" style="width:60px" onchange="myRefreshConfigTextarea()"></label>
+<br><br>
+<b>Bulk Audio Transfer PC→SD</b><br>
+<span id="myXferFolderName" style="font-family:monospace;color:#555;font-size:0.85em;">None selected</span><br><br>
+<button onclick="myXferPickFolder()">📂 Choose Folder</button>
+<button onclick="mySendAllToSd()" id="myXferSendAllBtn" style="font-weight:bold;" disabled>📤 PC→SD (audio)</button>
+<button onclick="myXferAbort()" id="myXferAbortBtn" style="display:none;background:#c00;color:#fff;">⏹ Abort</button>
+<br><br>
+<div style="font-size:0.85em;color:#444;">
+  <b>Status:</b> <span id="myXferStatus">Idle</span><br>
+  <b>Current file:</b> <span id="myXferCurrentFile">—</span><br>
+  <b>Progress:</b>
+  <div style="height:10px;background:#ddd;border-radius:5px;margin:4px 0;overflow:hidden;width:340px;">
+    <div id="myXferProgBar" style="height:100%;background:#0088cc;width:0%;transition:width 0.15s;"></div>
+  </div>
+  <span id="myXferProgText">0 / 0 bytes</span>
+</div>
+<div id="myXferLog" style="height:100px;overflow-y:auto;font-family:monospace;font-size:0.78em;background:#1e1e1e;color:#d4d4d4;padding:6px;border-radius:3px;resize:vertical;margin-top:4px;"></div>
+
+</td><td valign=top style="padding-left:20px;">
+<b>config.json — Live Editor</b><br>
+<p>Syncs automatically from the fields on the left.</p>
+<textarea id="myConfigTextarea" rows="30" cols="55" spellcheck="false"></textarea><br>
+<button onclick="myExportConfigJson()">💾 Save config.json → PC</button>
+<button onclick="myExportConfigJsonToSd()" style="background:#0077bb;color:#fff;font-weight:bold;">📤 Send config.json → SD</button>
+<br><br>
+<button onclick="mySaveBothToSd()" style="background:#005500;color:#fff;font-weight:bold;font-size:1.05em;padding:8px 16px;">📤📤 Send config.json + myWeights.bin → SD</button>
+</td></tr></table>
+
+</td></tr>
+</table>
+</div><!-- /myCodeSpace -->
+
+<p>By <a href="https://github.com/hpssjellis">Jeremy Ellis (hpssjellis)</a> ·
+<a href="https://www.linkedin.com/in/jeremy-ellis-4237a9bb/">LinkedIn</a> ·
+<a href="https://opencollective.com/mlsysbook">Support opencollective/mlsysbook</a> ·
+MIT License · Use at your own risk</p>
+<br><hr><br>
+
+<!-- ═══════════════════════════════════════════════════════════════════
+     SCRIPT 1 — STATE + GENERAL HELPERS
+═══════════════════════════════════════════════════════════════════ -->
+<script>
+var myModel = null;
+var myTimer = null;
+var myNumClasses = 3;
+var myTrainData = {0:[],1:[],2:[]};   // Float32Array(melFrames*melBins)
+var myRawData   = {0:[],1:[],2:[]};   // held-out val copies
+var myMaxBuffer = 500;
+var myEpochCount = 0, myLossSum = 0, myLossCount = 0;
+var myLossHistory = [], myTrainingPaused = false, myAnalysisStopped = false;
+var myAllDataIndex = 0, myCurrentEpoch = 0, myShuffledData = [];
+var myLastLoggedBatch = 0;
+
+// Serial
+var mySerialPort = null, mySerialReader = null, mySerialWriter = null;
+var mySerialConnected = false, mySerialBuffer = '';
+
+// SD browser
+var mySdCwd = '/', mySdEntries = [], mySdSelectedPath = null, mySdSelectedIsDir = false;
+var mySdCollectList = false, mySdCollectContent = false, mySdContentLines = [], mySdContentFile = null;
+var mySdReadingConfig = false;
+
+// File transfer (v78 protocol)
+var myXferResponseQueue = [], myFileSendActive = false, myFileSendAbort = false;
+
+// Browser mic
+var myMicStream = null, myAudioCtx = null, myAnalyser = null, myScriptProc = null;
+var myMicActive = false, myMicRecording = false, myMicRecordBuf = [];
+var myWaveAnimId = null;
+
+// Folders
+var mySaveFolder = null, myXferFolder = null;
+var myAutoSaveCounters = {0:1,1:1,2:1}, myDiskTotals = {0:0,1:0,2:0};
+
+function myReinitClassData(n) {
+  myTrainData={}; myRawData={}; myAutoSaveCounters={}; myDiskTotals={};
+  for (var i=0;i<n;i++) { myTrainData[i]=[]; myRawData[i]=[]; myAutoSaveCounters[i]=1; myDiskTotals[i]=0; }
+}
+
+// ── Draggable tiles ─────────────────────────────────────────────────
+var myActiveEl=null,myDragAction=null,myStartX,myStartY,myStartLeft,myStartTop,myStartW,myStartH,myMaxZ=100;
+function myBringToFront(el){myMaxZ++;el.style.zIndex=myMaxZ;}
+function myStartDragging(e,id){
+  var t=e.target.tagName;
+  if(t==='INPUT'||t==='SELECT'||t==='BUTTON'||t==='TEXTAREA'||t==='LABEL'||t==='A'||t==='PRE') return;
+  e.preventDefault(); myActiveEl=document.getElementById(id); myBringToFront(myActiveEl);
+  myDragAction='drag'; myStartX=e.clientX; myStartY=e.clientY;
+  myStartLeft=parseInt(myActiveEl.style.left)||0; myStartTop=parseInt(myActiveEl.style.top)||0;
+  window.onmousemove=myPerformAction; window.onmouseup=myStopAction;
+}
+function myStartResizing(e,id){
+  e.preventDefault(); myActiveEl=document.getElementById(id); myBringToFront(myActiveEl);
+  myDragAction='resize'; myStartX=e.clientX; myStartY=e.clientY;
+  myStartW=parseInt(myActiveEl.style.width)||400; myStartH=parseInt(myActiveEl.style.height)||300;
+  window.onmousemove=myPerformAction; window.onmouseup=myStopAction;
+}
+function myPerformAction(e){
+  if(!myActiveEl) return;
+  var dx=e.clientX-myStartX,dy=e.clientY-myStartY;
+  if(myDragAction==='drag'){myActiveEl.style.left=(myStartLeft+dx)+'px';myActiveEl.style.top=(myStartTop+dy)+'px';}
+  else{myActiveEl.style.width=Math.max(100,myStartW+dx)+'px';myActiveEl.style.height=Math.max(80,myStartH+dy)+'px';}
+}
+function myStopAction(){myActiveEl=null;myDragAction=null;window.onmousemove=null;window.onmouseup=null;}
+
+// ── Logging ──────────────────────────────────────────────────────────
+function myLog(msg){
+  var d=document.getElementById('myDivHistory');
+  var t=new Date().toLocaleTimeString();
+  d.innerHTML='<span>['+t+']</span> '+msg+'<br>'+d.innerHTML;
+}
+function mySerialLog(msg){
+  var b=document.getElementById('mySerialLog');
+  b.textContent+='['+new Date().toLocaleTimeString()+'] '+msg+'\n';
+  if(document.getElementById('mySerialAutoScroll').checked) b.scrollTop=b.scrollHeight;
+}
+
+// ── Labels / hints ───────────────────────────────────────────────────
+function myGetLabels(){
+  var l=[];
+  for(var i=0;i<myNumClasses;i++){var e=document.getElementById('myLabel'+i);l.push(e?e.value||('Class'+i):('Class'+i));}
+  return l;
+}
+
+function myUpdateEpochHint(){
+  var total=0; for(var i=0;i<myNumClasses;i++) total+=(myTrainData[i]?myTrainData[i].length:0);
+  var bs=parseInt(document.getElementById('myBatchSize').value)||12;
+  var bpe=total>0?Math.ceil(total/bs):1;
+  var ep=parseFloat(document.getElementById('myTargetEpochs').value)||30;
+  var mb=parseInt(document.getElementById('myMelBinsIn').value)||40;
+  var mf=parseInt(document.getElementById('myMelFramesIn').value)||32;
+  var el=document.getElementById('myEpochHint');
+  if(el) el.textContent=total>0
+    ?'~'+bpe+' batches/epoch = '+Math.ceil(ep*bpe)+' total  |  Input: '+mf+'×'+mb+' mel'
+    :'Waiting for audio data...';
+  myUpdateRamHint();
+}
+
+function myUpdateRamHint(){
+  var mb=parseInt(document.getElementById('myMelBinsIn').value)||40;
+  var mf=parseInt(document.getElementById('myMelFramesIn').value)||32;
+  var buf=parseInt(document.getElementById('myMaxBufferInput').value)||500;
+  var bpc=mb*mf*4;
+  var totalMb=(bpc*buf*myNumClasses/1048576).toFixed(1);
+  var el=document.getElementById('myRamHint');
+  if(el) el.textContent='~'+Math.round(bpc/1024)+'KB/clip · '+buf+'×'+myNumClasses+' = ~'+totalMb+'MB';
+  var hint=document.getElementById('myResolutionHint');
+  if(hint) hint.textContent='Input: '+mf+'×'+mb+' mel spectrogram = '+(mf*mb)+' floats';
+}
+
+function myUpdateMaxBuffer(){myMaxBuffer=parseInt(document.getElementById('myMaxBufferInput').value)||500;myUpdateRamHint();}
+
+function myToggleEpochMode(){
+  var all=document.getElementById('myUseAllData').checked;
+  document.getElementById('myEpochControls').style.display=all?'block':'none';
+  document.getElementById('myBatchControls').style.display=all?'none':'block';
+  myUpdateEpochHint();
+}
+
+function myUpdateValBox(){
+  var pct=parseInt(document.getElementById('myValidationPct').value)||10;
+  var counts=[]; for(var i=0;i<myNumClasses;i++) counts.push(myTrainData[i]?myTrainData[i].length:0);
+  var mn=counts.length?Math.min.apply(null,counts):0;
+  var hint=document.getElementById('myValHint');
+  if(mn<1){if(hint)hint.textContent='(load clips first)';return;}
+  var valN=Math.max(1,Math.round(mn*pct/100));
+  document.getElementById('myExportValidationImages').value=valN;
+  if(hint) hint.textContent='(min class: '+mn+')';
+}
+
+function mySnapshotValidationImages(){
+  var counts=[]; for(var i=0;i<myNumClasses;i++) counts.push(myTrainData[i]?myTrainData[i].length:0);
+  var mn=counts.length?Math.min.apply(null,counts):0;
+  var valN=parseInt(document.getElementById('myExportValidationImages').value)||2;
+  if(mn>0&&valN>=mn){valN=Math.max(1,mn-1);document.getElementById('myExportValidationImages').value=valN;myLog('WARNING: validationClips clamped to '+valN);}
+  myRefreshConfigTextarea(); return valN;
+}
+
+function myLossBar(loss){var n=Math.round(Math.min(1,loss/1.1)*8);return '█'.repeat(n)+'░'.repeat(8-n);}
+
+function myUpdateTrainingStatus(){
+  if(myTimer) return;
+  var min=parseInt(document.getElementById('myMinSamples').value)||5;
+  var counts=[]; for(var i=0;i<myNumClasses;i++) counts.push(myTrainData[i]?myTrainData[i].length:0);
+  var mn=Math.min.apply(null,counts);
+  var s=document.getElementById('myStatusDisplay');
+  if(s){
+    if(mn>=min){s.innerText='Ready — click Start/Rebuild Brain';}
+    else{
+      var labels=myGetLabels();
+      var need=counts.map(function(c,i){return Math.max(0,min-c)>0?Math.max(0,min-c)+' more for '+labels[i]:null;}).filter(Boolean).join(', ');
+      s.innerText='Loaded ['+counts.join(', ')+'] — need '+need;
+    }
+  }
+  myUpdateEpochHint(); myUpdateValBox();
+}
+</script>
+
+<!-- ═══════════════════════════════════════════════════════════════════
+     SCRIPT 2 — BROWSER MIC + MEL SPECTROGRAM
+═══════════════════════════════════════════════════════════════════ -->
+<script>
+async function myPopulateMicOptions(){
+  var sel=document.getElementById('myAudioDeviceSelect');
+  var prev=sel.value;
+  while(sel.options.length) sel.remove(0);
+  var devs=await navigator.mediaDevices.enumerateDevices();
+  devs.filter(function(d){return d.kind==='audioinput';}).forEach(function(d,i){
+    var o=document.createElement('option');o.value=d.deviceId;o.text=d.label||'Microphone '+(i+1);sel.appendChild(o);
+  });
+  if(Array.from(sel.options).some(function(o){return o.value===prev;})) sel.value=prev;
+}
+
+async function myStartMic(){
+  if(myMicActive) return;
+  try{
+    var devId=document.getElementById('myAudioDeviceSelect').value;
+    myAudioCtx=new(window.AudioContext||window.webkitAudioContext)({sampleRate:16000});
+    myMicStream=await navigator.mediaDevices.getUserMedia({
+      audio:{sampleRate:16000,channelCount:1,deviceId:devId?{exact:devId}:undefined},video:false
+    });
+    await myPopulateMicOptions();
+    var src=myAudioCtx.createMediaStreamSource(myMicStream);
+    myAnalyser=myAudioCtx.createAnalyser(); myAnalyser.fftSize=512;
+    myScriptProc=myAudioCtx.createScriptProcessor(1024,1,1);
+    myScriptProc.onaudioprocess=function(e){
+      if(myMicRecording) myMicRecordBuf.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+    };
+    src.connect(myAnalyser); src.connect(myScriptProc); myScriptProc.connect(myAudioCtx.destination);
+    myMicActive=true;
+    document.getElementById('myMicStartBtn').style.display='none';
+    document.getElementById('myMicStopBtn').style.display='inline-block';
+    // Clear spectrogram
+    var sc=document.getElementById('mySpectroCanvas');
+    sc.getContext('2d').fillStyle='#111'; sc.getContext('2d').fillRect(0,0,sc.width,sc.height);
+    myLog('Browser mic started');
+    myDrawWaveform();
+  }catch(e){myLog('Mic error: '+e.message);}
+}
+
+function myStopMic(){
+  if(!myMicActive) return;
+  if(myWaveAnimId){cancelAnimationFrame(myWaveAnimId);myWaveAnimId=null;}
+  if(myMicStream){myMicStream.getTracks().forEach(function(t){t.stop();});myMicStream=null;}
+  if(myScriptProc){myScriptProc.disconnect();myScriptProc=null;}
+  if(myAudioCtx){myAudioCtx.close();myAudioCtx=null;}
+  myAnalyser=null;myMicActive=false;myMicRecording=false;
+  document.getElementById('myMicStartBtn').style.display='inline-block';
+  document.getElementById('myMicStopBtn').style.display='none';
+  // Reset all record buttons
+  for(var i=0;i<myNumClasses;i++){
+    var b=document.getElementById('myRecordBrowserBtn'+i);
+    if(b){b.textContent='🎙 Record in Browser';b.style.background='';b.style.color='';}
+  }
+  myLog('Browser mic stopped');
+}
+
+// ── Waveform + spectrogram draw loop ─────────────────────────────────
+function myDrawWaveform(){
+  if(!myAnalyser) return;
+  var wc=document.getElementById('myWaveCanvas'),wctx=wc.getContext('2d');
+  var buf=new Uint8Array(myAnalyser.fftSize);
+  myAnalyser.getByteTimeDomainData(buf);
+  wctx.fillStyle='#111'; wctx.fillRect(0,0,wc.width,wc.height);
+  wctx.strokeStyle='#0cf'; wctx.lineWidth=1; wctx.beginPath();
+  for(var i=0;i<buf.length;i++){
+    var x=i/buf.length*wc.width,y=(buf[i]/128-1)*wc.height/2+wc.height/2;
+    i===0?wctx.moveTo(x,y):wctx.lineTo(x,y);
+  }
+  wctx.stroke();
+  // RMS level
+  var sq=0; for(var j=0;j<buf.length;j++){var s=buf[j]/128-1;sq+=s*s;}
+  var rms=Math.sqrt(sq/buf.length);
+  document.getElementById('myMicLevelBar').style.width=Math.min(100,rms*300)+'%';
+  document.getElementById('myMicRms').textContent=rms.toFixed(3);
+  // Scrolling spectrogram
+  var sc=document.getElementById('mySpectroCanvas'),sctx=sc.getContext('2d');
+  var freqBuf=new Uint8Array(myAnalyser.frequencyBinCount);
+  myAnalyser.getByteFrequencyData(freqBuf);
+  var img=sctx.getImageData(1,0,sc.width-1,sc.height);sctx.putImageData(img,0,0);
+  var numB=Math.min(40,freqBuf.length),bH=sc.height/numB;
+  for(var b=0;b<numB;b++){
+    var v=freqBuf[Math.floor(b/numB*freqBuf.length)];
+    var r=v>127?255:0,g=v>64&&v<192?255:0,bl=v<128?255:0;
+    sctx.fillStyle='rgb('+r+','+g+','+bl+')';
+    sctx.fillRect(sc.width-1,sc.height-(b+1)*bH,1,Math.ceil(bH));
+  }
+  myWaveAnimId=requestAnimationFrame(myDrawWaveform);
+}
+
+// ── Browser mic recording (1 second for a specific class) ─────────────
+function myTriggerBrowserRecord(classIdx){
+  if(!myMicActive){myLog('Start Browser Mic first (Section 3)');return;}
+  if(myMicRecording){myLog('Already recording...');return;}
+  var btn=document.getElementById('myRecordBrowserBtn'+classIdx);
+  myMicRecordBuf=[]; myMicRecording=true;
+  if(btn){btn.textContent='🔴 Recording 1s...';btn.style.background='#c00';btn.style.color='#fff';}
+  myLog('Recording 1s for class '+classIdx+' ('+myGetLabels()[classIdx]+')...');
+  setTimeout(function(){
+    myMicRecording=false;
+    if(btn){btn.textContent='🎙 Record in Browser';btn.style.background='';btn.style.color='';}
+    var totalLen=0; myMicRecordBuf.forEach(function(c){totalLen+=c.length;});
+    var combined=new Float32Array(totalLen),off=0;
+    myMicRecordBuf.forEach(function(c){combined.set(c,off);off+=c.length;});
+    var target=16000,trimmed=new Float32Array(target);
+    trimmed.set(combined.slice(0,target));
+    var spec=myComputeMelSpectrogram(trimmed);
+    myAddClipToClass(classIdx,spec,true);
+    myMicRecordBuf=[];
+    myLog('Browser clip done for class '+classIdx+': '+myTrainData[classIdx].length+' clips in buffer');
+    myUpdateTrainingStatus();
+  },1050);
+}
+
+// ── Mel spectrogram computation (pure browser JS FFT) ─────────────────
+function myHannWindow(n){
+  var w=new Float32Array(n);
+  for(var i=0;i<n;i++) w[i]=0.5*(1-Math.cos(2*Math.PI*i/(n-1)));
+  return w;
+}
+function myFFT(real,imag){
+  var n=real.length;
+  for(var i=1,j=0;i<n;i++){var bit=n>>1;for(;j&bit;bit>>=1) j^=bit;j^=bit;if(i<j){var tr=real[i];real[i]=real[j];real[j]=tr;var ti=imag[i];imag[i]=imag[j];imag[j]=ti;}}
+  for(var len=2;len<=n;len<<=1){
+    var ang=-2*Math.PI/len,wR=Math.cos(ang),wI=Math.sin(ang);
+    for(var k=0;k<n;k+=len){var cR=1,cI=0;for(var l=0;l<len/2;l++){var uR=real[k+l],uI=imag[k+l],vR=real[k+l+len/2]*cR-imag[k+l+len/2]*cI,vI=real[k+l+len/2]*cI+imag[k+l+len/2]*cR;real[k+l]=uR+vR;imag[k+l]=uI+vI;real[k+l+len/2]=uR-vR;imag[k+l+len/2]=uI-vI;var nR=cR*wR-cI*wI;cI=cR*wI+cI*wR;cR=nR;}}
+  }
+}
+function myHz2Mel(hz){return 2595*Math.log10(1+hz/700);}
+function myMel2Hz(mel){return 700*(Math.pow(10,mel/2595)-1);}
+
+function myComputeMelSpectrogram(samples){
+  var melBins=parseInt(document.getElementById('myMelBinsIn').value)||40;
+  var melFrames=parseInt(document.getElementById('myMelFramesIn').value)||32;
+  var fftSize=parseInt(document.getElementById('myFftSizeSel').value)||512;
+  var sr=16000,frameSize=Math.floor(samples.length/melFrames);
+  var hann=myHannWindow(Math.min(frameSize,fftSize));
+  var melLow=myHz2Mel(20),melHigh=myHz2Mel(sr/2),melStep=(melHigh-melLow)/(melBins+1),binScale=fftSize/sr;
+  var fbLo=new Float32Array(melBins),fbCtr=new Float32Array(melBins),fbHi=new Float32Array(melBins);
+  for(var m=0;m<melBins;m++){fbLo[m]=myMel2Hz(melLow+m*melStep)*binScale;fbCtr[m]=myMel2Hz(melLow+(m+1)*melStep)*binScale;fbHi[m]=myMel2Hz(melLow+(m+2)*melStep)*binScale;}
+  var out=new Float32Array(melFrames*melBins),clipMin=1e9,clipMax=-1e9;
+  for(var fr=0;fr<melFrames;fr++){
+    var start=fr*frameSize;
+    var real=new Float32Array(fftSize),imag=new Float32Array(fftSize);
+    for(var s=0;s<Math.min(frameSize,fftSize);s++) real[s]=(s<samples.length?samples[start+s]:0)*hann[s];
+    myFFT(real,imag);
+    var power=new Float32Array(fftSize/2+1);
+    for(var k=0;k<=fftSize/2;k++) power[k]=real[k]*real[k]+imag[k]*imag[k];
+    for(var mb=0;mb<melBins;mb++){
+      var loB=fbLo[mb],ctrB=fbCtr[mb],hiB=Math.min(fftSize/2,fbHi[mb]),energy=0;
+      for(var b=Math.floor(loB);b<ctrB&&b<=fftSize/2;b++){var w=(b-loB)/(ctrB-loB+1e-8);energy+=w*power[b];}
+      for(var b2=Math.ceil(ctrB);b2<hiB&&b2<=fftSize/2;b2++){var w2=(hiB-b2)/(hiB-ctrB+1e-8);energy+=w2*power[b2];}
+      var logE=Math.log10(energy+1e-6);out[fr*melBins+mb]=logE;
+      if(logE<clipMin)clipMin=logE;if(logE>clipMax)clipMax=logE;
+    }
+  }
+  var range=clipMax-clipMin;if(range<1)range=1;
+  for(var i=0;i<out.length;i++) out[i]=Math.max(0,Math.min(1,(out[i]-clipMin)/range));
+  return out;
+}
+
+function myAddClipToClass(classIdx,spec,autoSave){
+  if(myTrainData[classIdx].length>=myMaxBuffer) myTrainData[classIdx].shift();
+  myTrainData[classIdx].push(spec);
+  if(myRawData[classIdx].length>=myMaxBuffer) myRawData[classIdx].shift();
+  myRawData[classIdx].push(spec);
+  var el=document.getElementById('myCount'+classIdx);
+  if(el) el.innerHTML=myTrainData[classIdx].length+' clips';
+  if(autoSave&&mySaveFolder) myAutoSaveBrowserClip(classIdx,spec);
+}
+
+async function myAutoSaveBrowserClip(classIdx,spec){
+  try{
+    var label=myGetLabels()[classIdx];
+    var audioDir=await mySaveFolder.getDirectoryHandle('audio',{create:true});
+    var classDir=await audioDir.getDirectoryHandle(label,{create:true});
+    var n=myAutoSaveCounters[classIdx]++;
+    var fname='clip_'+String(n).padStart(5,'0')+'.f32';
+    var fh=await classDir.getFileHandle(fname,{create:true});
+    var w=await fh.createWritable(); await w.write(spec.buffer); await w.close();
+    myDiskTotals[classIdx]++;
+    myLog('Auto-saved '+fname+' ('+label+')');
+  }catch(e){myLog('Auto-save error: '+e.message);}
+}
+</script>
+
+<!-- ═══════════════════════════════════════════════════════════════════
+     SCRIPT 3 — WEBSERIAL
+═══════════════════════════════════════════════════════════════════ -->
+<script>
+function mySetSerialStatus(conn){
+  mySerialConnected=conn;
+  var el=document.getElementById('mySerialStatus');
+  if(conn){el.textContent='✓ Connected';el.style.color='green';}
+  else{el.textContent='Not Connected';el.style.color='';}
+}
+
+async function myConnectSerial(){
+  if(!('serial' in navigator)){alert('WebSerial not supported. Use Chrome or Edge.');return;}
+  try{
+    mySerialPort=await navigator.serial.requestPort();
+    await mySerialPort.open({baudRate:115200});
+    mySetSerialStatus(true);myLog('ESP32 Serial connected');mySerialLog('=== Connected at 115200 baud ===');
+    var dec=new TextDecoderStream(); mySerialPort.readable.pipeTo(dec.writable);
+    mySerialReader=dec.readable.getReader();
+    (async function(){
+      try{while(true){var r=await mySerialReader.read();if(r.done)break;if(r.value)myHandleSerialData(r.value);}}
+      catch(e){if(mySerialConnected)myLog('Serial read error: '+e.message);}
+    })();
+    var enc=new TextEncoderStream(); enc.readable.pipeTo(mySerialPort.writable);
+    mySerialWriter=enc.writable.getWriter();
+  }catch(e){myLog('Serial connect failed: '+e.message);}
+}
+
+async function myDisconnectSerial(){
+  try{if(mySerialReader)await mySerialReader.cancel();if(mySerialWriter)await mySerialWriter.close();if(mySerialPort)await mySerialPort.close();}catch(e){}
+  mySerialReader=null;mySerialWriter=null;mySerialPort=null;
+  mySetSerialStatus(false);myLog('ESP32 Serial disconnected');
+}
+
+async function mySendSerialChar(c){
+  if(!mySerialWriter){myLog('Not connected to ESP32');return;}
+  try{await mySerialWriter.write(c+'\n');mySerialLog('→ "'+c+'"');}
+  catch(e){myLog('Serial write error: '+e.message);}
+}
+async function mySendSerialLine(){
+  var cmd=document.getElementById('mySerialCmd').value.trim();
+  if(!cmd||!mySerialWriter) return;
+  try{await mySerialWriter.write(cmd+'\n');mySerialLog('→ '+cmd);document.getElementById('mySerialCmd').value='';}
+  catch(e){myLog('Serial write error: '+e.message);}
+}
+async function mySendSerialLine2(cmd){
+  if(!mySerialWriter){myLog('Not connected');return;}
+  try{await mySerialWriter.write(cmd+'\n');mySerialLog('→ '+cmd);}
+  catch(e){myLog('Serial write error: '+e.message);}
+}
+async function myWriteSerial(data){
+  if(!mySerialWriter) return;
+  try{await mySerialWriter.write(data);}catch(e){}
+}
+
+// ── Serial receive parser ─────────────────────────────────────────────
+function myHandleSerialData(chunk){
+  mySerialBuffer+=chunk;
+  var lines=mySerialBuffer.split('\n'); mySerialBuffer=lines.pop();
+  for(var li=0;li<lines.length;li++){
+    var l=lines[li].replace(/\r/g,'').trim(); if(!l) continue;
+
+    // TRAIN_EPOCH:<ep>,<loss>,<acc 0-1>
+    if(l.startsWith('TRAIN_EPOCH:')){
+      var p=l.substring(12).split(',');
+      mySerialLog('Epoch '+p[0]+' loss='+parseFloat(p[1]).toFixed(4)+' acc='+(parseFloat(p[2])*100).toFixed(1)+'%');
+      continue;
+    }
+    // COLLECT_COUNT:<classIdx>,<count>
+    if(l.startsWith('COLLECT_COUNT:')){
+      var p2=l.substring(14).split(',');
+      var ci=parseInt(p2[0]),cnt=parseInt(p2[1]);
+      var el=document.getElementById('myCount'+ci);
+      if(el) el.innerHTML=cnt+' clips (SD)';
+      myLog('[COLLECT] class='+ci+' count='+cnt); continue;
+    }
+    // INFER:<label>,<confidence 0-1>
+    if(l.startsWith('INFER:')){
+      var rest=l.substring(6),comma=rest.lastIndexOf(',');
+      var label=rest.substring(0,comma),conf=parseFloat(rest.substring(comma+1));
+      myUpdateInferenceDisplay(label,conf,null);
+      mySerialLog('[INFER] '+label+' '+Math.round(conf*100)+'%'); continue;
+    }
+    // RECORD_STATUS
+    if(l.startsWith('RECORD_STATUS:')){mySerialLog('[REC] '+l.substring(14));continue;}
+    // SD browser
+    if(l==='SD_LIST_START'){mySdCollectList=true;mySdEntries=[];continue;}
+    if(l.startsWith('SD_FILE:')&&mySdCollectList){
+      var p3=l.substring(8).split(',');
+      var nm=p3[0]&&p3[0].trim();
+      if(nm) mySdEntries.push({name:nm,size:(p3[1]&&p3[1].trim())||'0',isDir:(p3[2]&&p3[2].trim())==='D'});
+      continue;
+    }
+    if(l.startsWith('SD_LIST_END')&&mySdCollectList){mySdCollectList=false;mySdRenderList();continue;}
+    if(l==='SD_CONTENT_START'){mySdCollectContent=true;mySdContentLines=[];continue;}
+    if(l.startsWith('SD_LINE:')&&mySdCollectContent){mySdContentLines.push(l.substring(8));continue;}
+    if(l==='SD_CONTENT_END'&&mySdCollectContent){
+      mySdCollectContent=false;
+      if(mySdReadingConfig){mySdReadingConfig=false;mySdApplyConfig(mySdContentLines.join('\n'));}
+      else mySdShowText(mySdContentLines.join('\n')); continue;
+    }
+    // v78 file transfer ACKs
+    if(l.startsWith('OK:FILE_READY:')||l.startsWith('OK:CHUNK_ACK:')||l.startsWith('ERR:CHUNK_RETRY:')||l.startsWith('OK:FILE_DONE:')||l.startsWith('ERR:FILE_SIZE')||l.startsWith('ERR:No active')||l.startsWith('ERR:Cannot create')){
+      if(l.startsWith('OK:FILE_READY:')) myLog('✓ File ready: '+l.substring(14));
+      else if(l.startsWith('OK:FILE_DONE:')) myLog('✓ File done: '+l.substring(13));
+      else if(l.startsWith('ERR:')) myLog('↩ '+l);
+      mySerialLog(l); myXferResponseQueue.push(l); continue;
+    }
+    if(l.startsWith('OK:')||l.startsWith('CONFIG:APPLIED')||l.startsWith('WEIGHTS:')){mySerialLog('✓ '+l);continue;}
+    if(l.startsWith('ERR:')){myLog('✗ ESP32: '+l);mySerialLog(l);continue;}
+    mySerialLog(l);
+  }
+}
+</script>
+
+<!-- ═══════════════════════════════════════════════════════════════════
+     SCRIPT 4 — SD BROWSER
+═══════════════════════════════════════════════════════════════════ -->
+<script>
+function mySdRefresh(){if(!mySerialWriter){mySerialLog('Not connected');return;}myWriteSerial('SD_LIST:'+mySdCwd+'\n');}
+function mySdNavigate(path){mySdCwd=path;if(!mySdCwd.endsWith('/'))mySdCwd+='/';if(mySdCwd==='//') mySdCwd='/';mySdUpdateBreadcrumb();mySdRefresh();}
+function mySdGoUp(){if(mySdCwd==='/') return;var p=mySdCwd.replace(/\/$/,'').split('/');p.pop();mySdNavigate(p.join('/')||'/');}
+function mySdUpdateBreadcrumb(){
+  var bc=document.getElementById('mySdBreadcrumb');
+  var parts=mySdCwd.replace(/^\/|\/$/g,'').split('/').filter(Boolean);
+  var html='<span class="mySdBcItem" onclick="mySdNavigate(\'/\')">/ (root)</span>';
+  var path='';
+  for(var i=0;i<parts.length;i++){path+='/'+parts[i];html+=' › <span class="mySdBcItem" onclick="mySdNavigate(\''+path+'\')">'+parts[i]+'</span>';}
+  bc.innerHTML=html;
+}
+function mySdFmtSize(b){var n=parseInt(b)||0;if(n<1024)return n+' B';if(n<1048576)return(n/1024).toFixed(1)+' KB';return(n/1048576).toFixed(1)+' MB';}
+function mySdRenderList(){
+  var el=document.getElementById('mySdList');
+  if(!mySdEntries.length){el.innerHTML='<div style="padding:12px;color:#888;">— empty —</div>';return;}
+  var sorted=mySdEntries.slice().sort(function(a,b){if(a.isDir&&!b.isDir)return -1;if(!a.isDir&&b.isDir)return 1;return a.name.localeCompare(b.name);});
+  el.innerHTML=sorted.map(function(e){
+    var icon=e.isDir?'📁':/\.json$/i.test(e.name)?'{}':'📄';
+    var path=(mySdCwd+e.name).replace('//','/')
+    var cls='mySdEntry'+(e.isDir?' mySdEntryDir':'')+(mySdSelectedPath===path?' mySdSelected':'');
+    return '<div class="'+cls+'" onclick="mySdClick(\''+path.replace(/'/g,"\\'")+"',"+e.isDir+',event)"><span>'+icon+'</span><span class="mySdName">'+e.name+'</span><span class="mySdSize">'+(e.isDir?'':mySdFmtSize(e.size))+'</span></div>';
+  }).join('');
+}
+function mySdClick(path,isDir,event){
+  mySdSelectedPath=path;mySdSelectedIsDir=isDir;
+  document.querySelectorAll('.mySdEntry').forEach(function(e){e.classList.remove('mySdSelected');});
+  event.currentTarget.classList.add('mySdSelected');
+  document.getElementById('mySdDeleteBtn').style.display='inline-block';
+  if(isDir){if(event.detail===2)mySdNavigate(path);return;}
+  mySdOpenFile(path);
+}
+function mySdOpenFile(path){
+  mySdContentFile=path;
+  var name=path.split('/').pop();
+  document.getElementById('mySdViewer').style.display='block';
+  document.getElementById('mySdViewerName').textContent=name;
+  document.getElementById('mySdViewerText').style.display='none';
+  document.getElementById('mySdSaveTextBtn').style.display='none';
+  document.getElementById('mySdDownloadBtn').style.display='none';
+  if(/\.(json|txt|csv|log|h|ini)$/i.test(name)) myWriteSerial('SD_READ:'+path+'\n');
+  else{document.getElementById('mySdViewerText').value='Preview not available for this file type.';document.getElementById('mySdViewerText').style.display='block';}
+}
+function mySdShowText(content){
+  var ta=document.getElementById('mySdViewerText');ta.value=content;ta.style.display='block';
+  document.getElementById('mySdSaveTextBtn').style.display='inline';
+  document.getElementById('mySdDownloadBtn').style.display='inline';
+  document.getElementById('mySdViewer').style.display='block';
+}
+async function mySdSaveTextFile(){
+  if(!mySdContentFile||!mySerialWriter) return;
+  var content=document.getElementById('mySdViewerText').value;
+  var parentDir=mySdContentFile.substring(0,mySdContentFile.lastIndexOf('/'))||'/';
+  await myEnsureSdDir(parentDir);
+  await mySendTextChunked(mySdContentFile,content,mySdContentFile.split('/').pop());
+}
+function mySdDownloadFile(){
+  var name=(mySdContentFile||'file').split('/').pop();
+  var blob=new Blob([document.getElementById('mySdViewerText').value],{type:'text/plain'});
+  var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;a.click();
+  setTimeout(function(){URL.revokeObjectURL(a.href);},1000);
+}
+async function mySdDeleteSelected(){
+  if(!mySdSelectedPath) return;
+  var name=mySdSelectedPath.split('/').pop();
+  if(!confirm('Delete "'+name+'"?\nThis cannot be undone.')) return;
+  await myWriteSerial((mySdSelectedIsDir?'SD_RMDIR:':'SD_DELETE:')+mySdSelectedPath+'\n');
+  document.getElementById('mySdDeleteBtn').style.display='none';
+  mySdSelectedPath=null; setTimeout(mySdRefresh,600);
+}
+function mySdReadConfig(){
+  if(!mySerialWriter){mySerialLog('Not connected');return;}
+  mySdReadingConfig=true;myWriteSerial('SD_READ:/header/config.json\n');myLog('Reading config.json from SD...');
+}
+function mySdApplyConfig(text){
+  var cfg;try{cfg=JSON.parse(text.replace(/^SD_LINE:/gm,'').trim());}catch(e){myLog('Failed to parse config.json from SD: '+e.message);return;}
+  myApplyConfigObj(cfg);myLog('✓ Config synced from SD');
+}
+async function myEnsureSdDir(dirPath){
+  if(!mySerialWriter) return;
+  await myWriteSerial('SD_MKDIR:'+dirPath+'\n');
+  await new Promise(function(r){setTimeout(r,150);});
+}
+async function mySendTextChunked(sdPath,content,label){
+  var CHUNK=500,escaped=content.replace(/\n/g,'\\n');
+  myLog('Sending '+label+' to SD '+sdPath+'...');
+  await myWriteSerial('SD_TEXT_WRITE_START:'+sdPath+'\n');
+  await new Promise(function(r){setTimeout(r,80);});
+  for(var pos=0;pos<escaped.length;pos+=CHUNK){
+    await myWriteSerial('SD_TEXT_CHUNK:'+escaped.substring(pos,pos+CHUNK)+'\n');
+    if(((pos/CHUNK)+1)%10===0) await new Promise(function(r){setTimeout(r,15);});
+  }
+  await myWriteSerial('SD_TEXT_WRITE_END\n');
+}
+</script>
+
+<!-- ═══════════════════════════════════════════════════════════════════
+     SCRIPT 5 — CLASS ROWS + SERIAL BUTTONS
+═══════════════════════════════════════════════════════════════════ -->
+<script>
+var mySerialSelectedClass=-1;
+
+function myRenderClassRows(){
+  var container=document.getElementById('myClassRows');if(!container)return;
+  var defaults=['0Silence','1Yes','2No','3Word1','4Word2','5Word3','6Word4','7Word5'];
+  var existing=[];
+  for(var i=0;i<20;i++){var e=document.getElementById('myLabel'+i);existing[i]=e?e.value:null;}
+  var html='';
+  for(var i=0;i<myNumClasses;i++){
+    var val=existing[i]!==null?existing[i]:(defaults[i]||i+'Class');
+    html+='<b>Class '+i+':</b> ';
+    html+='<input type="text" id="myLabel'+i+'" value="'+val+'" oninput="myRefreshConfigTextarea();myRenderSerialButtons()">';
+    html+=' <span id="myCount'+i+'">0 clips</span>';
+    html+='<br>';
+    html+='<button onclick="myCollectDevice('+i+')" title="Send RECORD_START:'+i+' to ESP32 — records 1s PDM mic clip to SD">🎤 Record on Device</button>';
+    html+='<button id="myRecordBrowserBtn'+i+'" onclick="myTriggerBrowserRecord('+i+')" title="Record 1s via browser mic — computes Mel spectrogram — adds to training buffer">🎙 Record in Browser</button>';
+    html+='<button onclick="myLoadAudioFiles('+i+')" title="Load WAV or F32 files from PC disk">Load from PC</button>';
+    html+='<button onclick="myLoadFromSdClass('+i+')" title="Pull WAV clips from ESP32 SD card via WebSerial">📂 Load from SD</button>';
+    html+='<button onclick="myClearClips('+i+')" title="Clear RAM buffer — disk and SD untouched">Clear RAM</button>';
+    html+='<br><br>';
+  }
+  container.innerHTML=html;
+  myRenderSerialButtons();
+}
+
+function myRenderSerialButtons(){
+  var container=document.getElementById('mySerialClassBtns');if(!container)return;
+  var labels=myGetLabels(),html='';
+  for(var i=0;i<myNumClasses;i++)
+    html+='<button id="mySerialClassBtn'+i+'" onclick="mySerialClassTap('+i+')">'+(i+1)+'='+labels[i]+'</button> ';
+  container.innerHTML=html;
+  var tb=document.getElementById('mySerialTrainBtn'),ib=document.getElementById('mySerialInferBtn');
+  if(tb){tb.textContent=(myNumClasses+1)+'=Train';tb.onclick=function(){mySerialClearSelected();mySendSerialChar(String(myNumClasses+1));};}
+  if(ib){ib.textContent=(myNumClasses+2)+'=Infer';ib.onclick=function(){mySerialClearSelected();mySendSerialChar(String(myNumClasses+2));};}
+  mySerialClearSelected();
+}
+
+function mySerialClassTap(i){
+  if(mySerialSelectedClass===i){mySendSerialChar('l');mySerialClearSelected();}
+  else{mySendSerialChar(String(i+1));mySerialClearSelected();mySerialSelectedClass=i;var b=document.getElementById('mySerialClassBtn'+i);if(b){b.style.background='#0088cc';b.style.color='#fff';}}
+}
+function mySerialClearSelected(){
+  for(var i=0;i<myNumClasses;i++){var b=document.getElementById('mySerialClassBtn'+i);if(b){b.style.background='';b.style.color='';}}
+  mySerialSelectedClass=-1;
+}
+
+function myOnNumClassesChange(val){
+  var n=parseInt(val); if(isNaN(n)||n<2||n>8) return;
+  myNumClasses=n; myReinitClassData(n); myRenderClassRows(); myRefreshConfigTextarea();
+  myLog('Classes changed to '+n+' — audio buffers reset');
+}
+
+// ── Collect actions ───────────────────────────────────────────────────
+function myCollectDevice(classIdx){
+  mySerialClearSelected();
+  mySendSerialLine2('RECORD_START:'+classIdx);
+  myLog('Device recording request → class '+classIdx+' ('+myGetLabels()[classIdx]+')');
+}
+
+function myLoadAudioFiles(classIdx){
+  var inp=document.createElement('input');inp.type='file';inp.multiple=true;inp.accept='.wav,.f32,.bin';
+  inp.onchange=async function(e){
+    var files=Array.from(e.target.files);myLog('Loading '+files.length+' files for class '+classIdx+'...');
+    var loaded=0;
+    for(var fi=0;fi<files.length;fi++){
+      var file=files[fi];
+      try{
+        var ab=await file.arrayBuffer();var spec;
+        if(file.name.endsWith('.f32')||file.name.endsWith('.bin')){spec=new Float32Array(ab);}
+        else{
+          // WAV: skip 44-byte header, read int16 PCM
+          var i16=new Int16Array(ab,44,Math.min((ab.byteLength-44)/2,16000));
+          var f32=new Float32Array(i16.length);
+          for(var s=0;s<i16.length;s++) f32[s]=i16[s]/32768;
+          spec=myComputeMelSpectrogram(f32);
+        }
+        myAddClipToClass(classIdx,spec,false);loaded++;
+      }catch(err){myLog('Error loading '+file.name+': '+err.message);}
+    }
+    myLog('Loaded '+loaded+'/'+files.length+' clips for class '+classIdx);
+    myUpdateTrainingStatus();
+  };
+  inp.click();
+}
+
+function myClearClips(classIdx){
+  myTrainData[classIdx]=[]; myRawData[classIdx]=[];
+  document.getElementById('myCount'+classIdx).innerHTML='0 clips';
+  myLog('Class '+classIdx+': RAM cleared'); myUpdateEpochHint();
+}
+
+function myLoadFromSdClass(classIdx){
+  myLog('To load from SD: use SD browser above → navigate to /audio/'+myGetLabels()[classIdx]+'/ → double-click directory, then download files and use Load from PC.');
+}
+
+// ── Folder operations ─────────────────────────────────────────────────
+async function myPickSaveFolder(){
+  if(!('showDirectoryPicker' in window)){myLog('File System Access API not supported — use Chrome or Edge');return;}
+  try{
+    mySaveFolder=await window.showDirectoryPicker({mode:'readwrite'});
+    await mySaveFolder.getDirectoryHandle('audio',{create:true});
+    await mySaveFolder.getDirectoryHandle('header',{create:true});
+    myXferFolder=mySaveFolder;
+    document.getElementById('myXferSendAllBtn').disabled=false;
+    myUpdateFolderStatus();
+    myLog('Project folder: '+mySaveFolder.name+'/ (audio/ and header/ created)');
+  }catch(e){if(e.name!=='AbortError')myLog('Folder picker error: '+e.message);}
+}
+function myForgetSaveFolder(){
+  mySaveFolder=null;for(var i=0;i<myNumClasses;i++){myDiskTotals[i]=0;myAutoSaveCounters[i]=1;}
+  myUpdateFolderStatus();myLog('Project folder forgotten');
+}
+function myUpdateFolderStatus(){
+  var el=document.getElementById('myFolderStatus'),btn=document.getElementById('myForgetFolderBtn');
+  if(!mySaveFolder){el.textContent='None — audio held in RAM only';el.style.color='#888';if(btn)btn.style.display='none';return;}
+  var totals=[];for(var i=0;i<myNumClasses;i++) totals.push(myDiskTotals[i]||0);
+  el.textContent='✓ '+mySaveFolder.name+'/audio/  ['+totals.join(' / ')+' clips]';el.style.color='#007700';
+  if(btn)btn.style.display='inline-block';
+}
+
+async function myPickAndLoadFolder(){
+  if(!('showDirectoryPicker' in window)){myLog('File System Access API not supported');return;}
+  var rootDir=mySaveFolder;
+  if(!rootDir){try{rootDir=await window.showDirectoryPicker({mode:'read'});}catch(e){if(e.name!=='AbortError')myLog('Folder picker error: '+e.message);return;}}
+  var audioDir;
+  try{audioDir=await rootDir.getDirectoryHandle('audio',{create:false});}
+  catch(e){myLog('No audio/ sub-folder in '+rootDir.name);return;}
+  var labels=myGetLabels();
+  myLog('Loading from '+rootDir.name+'/audio/ ...');
+  for(var ci=0;ci<myNumClasses;ci++){
+    var classDir;
+    try{classDir=await audioDir.getDirectoryHandle(labels[ci],{create:false});}
+    catch(e){myLog('  '+labels[ci]+': not found, skipping');continue;}
+    var loaded=0;
+    for await(var entry of classDir.entries()){
+      var name=entry[0],fh=entry[1];
+      if(!/\.(wav|f32|bin)$/i.test(name)) continue;
+      try{
+        var file=await fh.getFile(),ab=await file.arrayBuffer(),spec;
+        if(name.endsWith('.f32')||name.endsWith('.bin')){spec=new Float32Array(ab);}
+        else{var i16=new Int16Array(ab,44,Math.min((ab.byteLength-44)/2,16000));var f32=new Float32Array(i16.length);for(var s=0;s<i16.length;s++)f32[s]=i16[s]/32768;spec=myComputeMelSpectrogram(f32);}
+        myAddClipToClass(ci,spec,false);loaded++;
+      }catch(err){}
+    }
+    myLog('  '+labels[ci]+': '+loaded+' clips loaded');
+  }
+  myUpdateTrainingStatus();myUpdateEpochHint();
+}
+</script>
+
+<!-- ═══════════════════════════════════════════════════════════════════
+     SCRIPT 6 — BROWSER TRAINING LOOP
+═══════════════════════════════════════════════════════════════════ -->
+<script>
+function myBuildModel(){
+  if(myModel){myModel.dispose();myModel=null;}
+  var mb=parseInt(document.getElementById('myMelBinsIn').value)||40;
+  var mf=parseInt(document.getElementById('myMelFramesIn').value)||32;
+  var c1=parseInt(document.getElementById('myConv1FiltersIn').value)||4;
+  var c2=parseInt(document.getElementById('myConv2FiltersIn').value)||8;
+  var lr=parseFloat(document.getElementById('myLearningRate').value)||0.0003;
+  var nC=myNumClasses;
+  // Matches firmware: Conv2D(3x3,c1)→LeakyReLU→MaxPool2D(2x2)→Conv2D(3x3,c2)→LeakyReLU→Flatten→Dense→Softmax
+  myModel=tf.sequential();
+  myModel.add(tf.layers.conv2d({inputShape:[mf,mb,1],kernelSize:3,filters:c1,activation:null,padding:'valid'}));
+  myModel.add(tf.layers.leakyReLU({alpha:0.1}));
+  myModel.add(tf.layers.maxPooling2d({poolSize:2,strides:2}));
+  myModel.add(tf.layers.conv2d({kernelSize:3,filters:c2,activation:null,padding:'valid'}));
+  myModel.add(tf.layers.leakyReLU({alpha:0.1}));
+  myModel.add(tf.layers.flatten());
+  myModel.add(tf.layers.dense({units:nC,activation:'softmax',kernelInitializer:'heNormal'}));
+  myModel.compile({optimizer:tf.train.adam(lr),loss:'categoricalCrossentropy',metrics:['accuracy']});
+  myLog('Brain built: '+mf+'×'+mb+'×1 mel | Conv2D('+c1+')→MaxPool→Conv2D('+c2+')→Dense('+nC+') | LR='+lr);
+  return myModel;
+}
+
+async function myStartBrain(){
+  mySnapshotValidationImages();
+  if(!myModel) myBuildModel();
+  if(myTimer) cancelAnimationFrame(myTimer);
+  myEpochCount=0;myLossSum=0;myLossCount=0;myLossHistory=[];myAllDataIndex=0;myCurrentEpoch=0;myShuffledData=[];
+  myTrainingPaused=false;
+  document.getElementById('myPauseBtn').disabled=false;
+  myLog('Browser brain started');
+  var mb=parseInt(document.getElementById('myMelBinsIn').value)||40;
+  var mf=parseInt(document.getElementById('myMelFramesIn').value)||32;
+  var nC=myNumClasses;
+
+  var myRafLoop=async function(){
+    var minS=parseInt(document.getElementById('myMinSamples').value)||5;
+    var counts=[];for(var i=0;i<myNumClasses;i++) counts.push(myTrainData[i]?myTrainData[i].length:0);
+    var minC=Math.min.apply(null,counts),bsz=Math.max(nC,parseInt(document.getElementById('myBatchSize').value)||12);
+    var useAll=document.getElementById('myUseAllData').checked;
+    var maxBatches=0;
+    if(useAll){var ep=parseFloat(document.getElementById('myTargetEpochs').value)||0,tot2=counts.reduce(function(a,b){return a+b;},0),bpe=tot2>0?Math.ceil(tot2/bsz):1;maxBatches=ep>0?Math.ceil(ep*bpe):0;}
+    else{maxBatches=parseInt(document.getElementById('myMaxBatches').value)||0;}
+    var reached=maxBatches>0&&myEpochCount>=maxBatches;
+
+    function myOneHot(cls,n){var a=[];for(var i=0;i<n;i++) a.push(i===cls?1:0);return a;}
+
+    if(minC>=minS&&!myTrainingPaused&&!reached){
+      var batch=[],labels2=[];
+      if(useAll){
+        if(myAllDataIndex===0){
+          myCurrentEpoch++;myShuffledData=[];
+          for(var ci=0;ci<myNumClasses;ci++) for(var si=0;si<myTrainData[ci].length;si++) myShuffledData.push({sample:myTrainData[ci][si],label:ci});
+          for(var i=myShuffledData.length-1;i>0;i--){var j=Math.floor(Math.random()*(i+1));var tmp=myShuffledData[i];myShuffledData[i]=myShuffledData[j];myShuffledData[j]=tmp;}
+          myLog('Epoch '+myCurrentEpoch+' start ('+myShuffledData.length+' clips)');
+        }
+        for(var bi=0;bi<bsz&&myAllDataIndex<myShuffledData.length;bi++){batch.push(myShuffledData[myAllDataIndex].sample);labels2.push(myOneHot(myShuffledData[myAllDataIndex].label,nC));myAllDataIndex++;}
+        if(myAllDataIndex>=myShuffledData.length) myAllDataIndex=0;
+      }else{
+        var perCls=Math.floor(bsz/nC);
+        for(var ci=0;ci<myNumClasses;ci++) for(var si=0;si<perCls;si++){var idx=Math.floor(Math.random()*myTrainData[ci].length);batch.push(myTrainData[ci][idx]);labels2.push(myOneHot(ci,nC));}
+      }
+      if(batch.length>0){
+        var xs=tf.tensor4d(batch.map(function(s){return Array.from(s);}), [batch.length,mf,mb,1]);
+        var ys=tf.tensor2d(labels2);
+        var loss=0;
+        try{var r=await myModel.trainOnBatch(xs,ys);loss=Array.isArray(r)?r[0]:r;if(isNaN(loss)||!isFinite(loss))loss=0;}
+        catch(e){myLog('Train error: '+e.message);}
+        xs.dispose();ys.dispose();
+        myEpochCount++;if(loss>0){myLossSum+=loss;myLossCount++;}
+        if(myEpochCount%20===0){
+          var avg=myLossCount>0?myLossSum/myLossCount:0;
+          if(avg>0&&isFinite(avg))myLossHistory.push(avg);
+          if(myLossHistory.length>20)myLossHistory.shift();
+          var recAvg=myLossHistory.length>0?myLossHistory.reduce(function(a,b){return a+b;})/myLossHistory.length:0;
+          document.getElementById('myEpochDisplay').innerText=myEpochCount;
+          document.getElementById('myLossDisplay').innerText=myLossHistory.length>0?recAvg.toFixed(4):'--';
+          var status='',pct=0;
+          if(!myLossHistory.length){status='Initializing...';pct=5;}
+          else if(recAvg>1.0){status='Starting...';pct=10;}
+          else if(recAvg>0.5){status='Training...';pct=30;}
+          else if(recAvg>0.2){status='Improving...';pct=60;}
+          else if(recAvg>0.1){status='Converging...';pct=80;}
+          else{status='Well Trained!';pct=100;}
+          document.getElementById('myStatusDisplay').innerText=status;
+          document.getElementById('myProgressBar').style.width=pct+'%';
+          if(myEpochCount%100===0)myUpdateConfusionMatrix();
+          if(mySaveFolder&&document.getElementById('myAutoSaveWeights').checked&&myEpochCount%20===0){myExportBin();myExportConfigJson();}
+          if(myEpochCount-myLastLoggedBatch>=50){
+            myLastLoggedBatch=myEpochCount;
+            myLog((useAll?'Batch '+myEpochCount+' | Epoch '+myCurrentEpoch:'Batch '+myEpochCount)+' | Loss '+recAvg.toFixed(4)+' '+myLossBar(recAvg)+' | '+status);
+          }
+          myLossSum=0;myLossCount=0;
+        }
+      }
+    }else if(reached){
+      if(!myTrainingPaused){myPauseTraining();myLog('Training complete — reached target');}
+      document.getElementById('myStatusDisplay').innerText='Completed ('+myEpochCount+' batches)';
+    }else if(!myTrainingPaused){
+      var need=[];for(var i=0;i<myNumClasses;i++) need.push(Math.max(0,minS-(myTrainData[i]?myTrainData[i].length:0)));
+      document.getElementById('myStatusDisplay').innerText='Waiting (need more: ['+need.join(', ')+'])';
+    }
+
+    // Live browser inference from mic if running
+    if(!myAnalysisStopped&&myMicActive&&myModel&&myEpochCount%5===0) await myRunLiveInfer();
+
+    myTimer=requestAnimationFrame(myRafLoop);
+  };
+  myTimer=requestAnimationFrame(myRafLoop);
+}
+
+async function myForceStartTraining(){
+  var el=document.getElementById('myMinSamples'),saved=el.value;el.value=1;
+  myLog('Force Train: bypassing min-clips guard');
+  await myStartBrain(); el.value=saved;
+}
+function myPauseTraining(){
+  myTrainingPaused=true;
+  document.getElementById('myPauseBtn').style.display='none';
+  document.getElementById('myResumeBtn').style.display='block';
+  myLog('Training paused');
+}
+function myResumeTraining(){
+  myTrainingPaused=false;
+  document.getElementById('myPauseBtn').style.display='inline-block';
+  document.getElementById('myResumeBtn').style.display='none';
+  myLog('Training resumed');if(!myTimer)myStartBrain();
+}
+function myStopAnalysis(){myAnalysisStopped=true;document.getElementById('myStopAnalysisBtn').style.display='none';document.getElementById('myStartAnalysisBtn').style.display='block';}
+function myStartAnalysis(){myAnalysisStopped=false;document.getElementById('myStopAnalysisBtn').style.display='block';document.getElementById('myStartAnalysisBtn').style.display='none';}
+
+// ── Inference display ─────────────────────────────────────────────────
+function myUpdateInferenceDisplay(labelStr,conf,allProbs){
+  var labels=myGetLabels(),html='';
+  if(allProbs){
+    var bestIdx=allProbs.indexOf(Math.max.apply(null,allProbs));
+    for(var i=0;i<labels.length;i++){
+      var pct=Math.round(allProbs[i]*100);
+      html+='<div class="myInferRow"><span class="myInferLabel">'+labels[i]+'</span><div class="myInferBarWrap"><div class="myInferBarFill" style="width:'+pct+'%;background:'+(i===bestIdx?'#0088cc':'#aaa')+'"></div></div><span class="myInferPct">'+pct+'%</span></div>';
+    }
+    html+='<b>→ '+labels[bestIdx]+'  '+Math.round(allProbs[bestIdx]*100)+'%</b>';
+  }else if(labelStr!==null){
+    var pct2=Math.round(conf*100);
+    html='<div class="myInferRow"><span class="myInferLabel">'+labelStr+'</span><div class="myInferBarWrap"><div class="myInferBarFill" style="width:'+pct2+'%;"></div></div><span class="myInferPct">'+pct2+'%</span></div><b>→ '+labelStr+'  '+pct2+'%</b>';
+  }
+  document.getElementById('myOutputDisplay').innerHTML=html||'Ready...';
+}
+
+async function myRunLiveInfer(){
+  if(!myAnalyser||!myModel) return;
+  var mb=parseInt(document.getElementById('myMelBinsIn').value)||40;
+  var mf=parseInt(document.getElementById('myMelFramesIn').value)||32;
+  var freqBuf=new Uint8Array(myAnalyser.frequencyBinCount);
+  myAnalyser.getByteFrequencyData(freqBuf);
+  var spec=new Float32Array(mf*mb),numB=Math.min(mb,freqBuf.length);
+  for(var fr=0;fr<mf;fr++) for(var m=0;m<numB;m++) spec[fr*mb+m]=freqBuf[Math.floor(m/numB*freqBuf.length)]/255;
+  var xs=tf.tensor4d(Array.from(spec),[1,mf,mb,1]);
+  var pred=myModel.predict(xs);var probs=Array.from(await pred.data());
+  xs.dispose();pred.dispose();
+  myUpdateInferenceDisplay(null,null,probs);
+}
+
+async function myBrowserInferNow(){
+  if(!myModel){myLog('Start brain first');return;}
+  if(!myMicActive){myLog('Start browser mic first');return;}
+  await myRunLiveInfer();
+}
+
+async function myUpdateConfusionMatrix(){
+  if(!myModel){myLog('No model — start brain first');return;}
+  var labels=myGetLabels(),nC=labels.length;
+  var mb=parseInt(document.getElementById('myMelBinsIn').value)||40;
+  var mf=parseInt(document.getElementById('myMelFramesIn').value)||32;
+  var matrix=Array.from({length:nC},function(){return Array(nC).fill(0);});
+  for(var ci=0;ci<nC;ci++){
+    var samples=myRawData[ci];if(!samples||!samples.length) continue;
+    await tf.tidy(function(){
+      var cls=ci;
+      var xs=tf.tensor4d(samples.map(function(s){return Array.from(s);}), [samples.length,mf,mb,1]);
+      var preds=myModel.predict(xs).argMax(-1).dataSync();
+      preds.forEach(function(p){matrix[cls][p]++;});
+    });
+    await tf.nextFrame();
+  }
+  var html='<table border="1" style="border-collapse:collapse;text-align:center;">';
+  html+='<tr><td></td><td colspan="'+nC+'" style="background:#eee;"><b>Predicted →</b></td></tr>';
+  html+='<tr><td style="background:#eee;"><b>Actual ↓</b></td>';
+  labels.forEach(function(l){html+='<td style="padding:5px;background:#f9f9f9;"><b>'+l+'</b></td>';});
+  html+='</tr>';
+  matrix.forEach(function(row,i){
+    html+='<tr><td style="background:#f9f9f9;padding:5px;"><b>'+labels[i]+'</b></td>';
+    row.forEach(function(count,j){
+      var bg=i===j?(count>0?'#e6ffed':'#f9f9f9'):(count>0?'#ffeef0':'#f9f9f9');
+      html+='<td style="padding:10px;background:'+bg+';">'+count+'</td>';
+    });
+    html+='</tr>';
+  });
+  html+='</table>';
+  document.getElementById('myConfusionMatrixContainer').innerHTML=html;
+  myLog('Confusion matrix updated');
+}
+</script>
+
+<!-- ═══════════════════════════════════════════════════════════════════
+     SCRIPT 7 — CONFIG + WEIGHTS EXPORT
+═══════════════════════════════════════════════════════════════════ -->
+<script>
+function myBuildConfigObj(){
+  var labels=myGetLabels();
+  return {
+    version:         parseInt(document.getElementById('myBinVersion').value)||14,
+    numClasses:      myNumClasses,numLabels:myNumClasses,classLabels:labels,
+    inputSize:       (parseInt(document.getElementById('myCfgMelBins').value)||40)*(parseInt(document.getElementById('myCfgMelFrames').value)||32),
+    conv1Filters:    parseInt(document.getElementById('myConv1FiltersIn').value)||4,
+    conv2Filters:    parseInt(document.getElementById('myConv2FiltersIn').value)||8,
+    learningRate:    parseFloat(document.getElementById('myLearningRate').value)||0.0003,
+    batchSize:       parseInt(document.getElementById('myBatchSize').value)||12,
+    targetEpochs:    Math.ceil(parseFloat(document.getElementById('myTargetEpochs').value)||30),
+    useAugmentation: document.getElementById('myExportAugmentation').checked,
+    useGrayscale:    document.getElementById('myExportGrayscale').checked,
+    validationImages:parseInt(document.getElementById('myExportValidationImages').value)||2,
+    sampleRate:      parseInt(document.getElementById('myCfgSampleRate').value)||16000,
+    melBins:         parseInt(document.getElementById('myCfgMelBins').value)||40,
+    melFrames:       parseInt(document.getElementById('myCfgMelFrames').value)||32,
+    fftSize:         parseInt(document.getElementById('myCfgFftSize').value)||512,
+    vadThreshold:    parseInt(document.getElementById('myCfgVadThreshold').value)||500,
+    vadWindowMs:     parseInt(document.getElementById('myCfgVadWindowMs').value)||100
+  };
+}
+
+function myRefreshConfigTextarea(){
+  var ta=document.getElementById('myConfigTextarea');
+  if(ta) ta.value=JSON.stringify(myBuildConfigObj(),null,2);
+  // Sync mel fields
+  var mb=document.getElementById('myMelBinsIn').value;
+  var mf=document.getElementById('myMelFramesIn').value;
+  var ff=document.getElementById('myFftSizeSel').value;
+  document.getElementById('myCfgMelBins').value=mb;
+  document.getElementById('myCfgMelFrames').value=mf;
+  document.getElementById('myCfgFftSize').value=ff;
+}
+
+function myApplyConfigObj(cfg){
+  if(cfg.learningRate!==undefined)     document.getElementById('myLearningRate').value=cfg.learningRate;
+  if(cfg.batchSize!==undefined)        document.getElementById('myBatchSize').value=cfg.batchSize;
+  if(cfg.targetEpochs!==undefined)     document.getElementById('myTargetEpochs').value=cfg.targetEpochs;
+  if(cfg.version!==undefined)          document.getElementById('myBinVersion').value=cfg.version;
+  if(cfg.validationImages!==undefined) document.getElementById('myExportValidationImages').value=cfg.validationImages;
+  if(cfg.useAugmentation!==undefined)  document.getElementById('myExportAugmentation').checked=!!cfg.useAugmentation;
+  if(cfg.useGrayscale!==undefined)     document.getElementById('myExportGrayscale').checked=!!cfg.useGrayscale;
+  if(cfg.sampleRate!==undefined)       document.getElementById('myCfgSampleRate').value=cfg.sampleRate;
+  if(cfg.melBins!==undefined)         {document.getElementById('myCfgMelBins').value=cfg.melBins; document.getElementById('myMelBinsIn').value=cfg.melBins;}
+  if(cfg.melFrames!==undefined)       {document.getElementById('myCfgMelFrames').value=cfg.melFrames; document.getElementById('myMelFramesIn').value=cfg.melFrames;}
+  if(cfg.fftSize!==undefined)         {document.getElementById('myCfgFftSize').value=cfg.fftSize; document.getElementById('myFftSizeSel').value=cfg.fftSize;}
+  if(cfg.vadThreshold!==undefined)     document.getElementById('myCfgVadThreshold').value=cfg.vadThreshold;
+  if(cfg.vadWindowMs!==undefined)      document.getElementById('myCfgVadWindowMs').value=cfg.vadWindowMs;
+  if(cfg.conv1Filters!==undefined)     document.getElementById('myConv1FiltersIn').value=cfg.conv1Filters;
+  if(cfg.conv2Filters!==undefined)     document.getElementById('myConv2FiltersIn').value=cfg.conv2Filters;
+  var newN=parseInt(cfg.numLabels||cfg.numClasses)||myNumClasses;
+  if(newN!==myNumClasses&&!myModel){
+    myNumClasses=newN;myReinitClassData(newN);
+    document.getElementById('myNumClassesSelect').value=String(Math.min(8,Math.max(2,newN)));
+  }
+  myRenderClassRows();
+  if(Array.isArray(cfg.classLabels)){
+    for(var i=0;i<Math.min(cfg.classLabels.length,myNumClasses);i++){
+      var el=document.getElementById('myLabel'+i);if(el&&cfg.classLabels[i]) el.value=cfg.classLabels[i];
+    }
+  }
+  myRefreshConfigTextarea();myUpdateEpochHint();
+}
+
+async function myLoadConfigFromFolder(){
+  if(mySaveFolder){
+    try{var hdr=await mySaveFolder.getDirectoryHandle('header',{create:false});var fh=await hdr.getFileHandle('config.json',{create:false});var file=await fh.getFile();myApplyConfigObj(JSON.parse(await file.text()));myLog('✓ config.json from '+mySaveFolder.name+'/header/');return;}
+    catch(e){myLog('config.json not found in folder — using file picker');}
+  }
+  var inp=document.createElement('input');inp.type='file';inp.accept='.json';
+  inp.onchange=async function(e){var file=e.target.files[0];if(!file)return;try{myApplyConfigObj(JSON.parse(await file.text()));myLog('✓ config.json loaded from PC');}catch(err){myLog('ERROR: '+err.message);}};
+  inp.click();
+}
+
+async function myExportConfigJson(){
+  myRefreshConfigTextarea();
+  var jsonText=document.getElementById('myConfigTextarea').value;
+  if(mySaveFolder){
+    try{var hdr=await mySaveFolder.getDirectoryHandle('header',{create:true});var fh=await hdr.getFileHandle('config.json',{create:true});var w=await fh.createWritable();await w.write(jsonText);await w.close();myLog('config.json → '+mySaveFolder.name+'/header/');return;}
+    catch(e){myLog('Folder save failed: '+e.message);}
+  }
+  var blob=new Blob([jsonText],{type:'application/json'});var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='config.json';a.click();setTimeout(function(){URL.revokeObjectURL(a.href);},1000);
+  myLog('config.json → PC Downloads');
+}
+async function myExportConfigJsonToSd(){
+  if(!mySerialWriter){myLog('Not connected');return;}
+  myRefreshConfigTextarea();
+  await myEnsureSdDir('/header');
+  await mySendTextChunked('/header/config.json',document.getElementById('myConfigTextarea').value,'config.json');
+}
+
+async function myExportBin(){
+  if(!myModel){myLog('No model to export');return;}
+  var weights=myModel.getWeights(),parts=[];
+  for(var wi=0;wi<weights.length;wi++) parts.push(await weights[wi].data());
+  var total=parts.reduce(function(s,a){return s+a.length;},0);
+  var buf=new Float32Array(total),off=0;
+  for(var pi=0;pi<parts.length;pi++){buf.set(parts[pi],off);off+=parts[pi].length;}
+  var cfg=JSON.stringify(myBuildConfigObj()),hdrBytes=new TextEncoder().encode(cfg),hdrLen=new Uint32Array([hdrBytes.length]);
+  var final=new Uint8Array(4+hdrBytes.length+buf.buffer.byteLength);
+  final.set(new Uint8Array(hdrLen.buffer),0);final.set(hdrBytes,4);final.set(new Uint8Array(buf.buffer),4+hdrBytes.length);
+  if(mySaveFolder){
+    try{var hdr=await mySaveFolder.getDirectoryHandle('header',{create:true});var fh=await hdr.getFileHandle('myWeights.bin',{create:true});var w=await fh.createWritable();await w.write(new Blob([final]));await w.close();myLog('myWeights.bin → '+mySaveFolder.name+'/header/ ('+final.length+' B)');return;}
+    catch(e){myLog('Folder save failed: '+e.message);}
+  }
+  var blob=new Blob([final],{type:'application/octet-stream'});var a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='myWeights.bin';a.click();setTimeout(function(){URL.revokeObjectURL(a.href);},1000);
+  myLog('myWeights.bin → PC Downloads ('+final.length+' B)');
+}
+
+async function myExportBinToSd(){
+  if(!mySerialWriter||!myModel){myLog('Not connected or no model');return;}
+  var weights=myModel.getWeights(),parts=[];
+  for(var wi=0;wi<weights.length;wi++) parts.push(await weights[wi].data());
+  var total=parts.reduce(function(s,a){return s+a.length;},0);
+  var buf=new Float32Array(total),off=0;
+  for(var pi=0;pi<parts.length;pi++){buf.set(parts[pi],off);off+=parts[pi].length;}
+  var cfg=JSON.stringify(myBuildConfigObj()),hdrBytes=new TextEncoder().encode(cfg),hdrLen=new Uint32Array([hdrBytes.length]);
+  var final=new Uint8Array(4+hdrBytes.length+buf.buffer.byteLength);
+  final.set(new Uint8Array(hdrLen.buffer),0);final.set(hdrBytes,4);final.set(new Uint8Array(buf.buffer),4+hdrBytes.length);
+  myLog('Sending myWeights.bin → SD ('+final.length+' B)...');
+  myXferResponseQueue=[];myFileSendActive=true;myFileSendAbort=false;
+  await myEnsureSdDir('/header');
+  try{
+    await mySendFile(new File([new Blob([final])],'myWeights.bin'),'/header/myWeights.bin');
+    myLog('✓ myWeights.bin → SD /header/myWeights.bin');
+  }catch(e){myLog('✗ myWeights.bin SD transfer failed: '+e.message);}
+  finally{myFileSendActive=false;myXferResponseQueue=[];}
+}
+
+async function mySaveBothToSd(){
+  if(!mySerialWriter){myLog('Not connected');return;}
+  myLog('=== Saving config.json + myWeights.bin → SD /header/ ===');
+  await myExportConfigJsonToSd();
+  await new Promise(function(r){setTimeout(r,300);});
+  await myExportBinToSd();
+  myLog('=== Both files saved ===');
+}
+
+async function myLoadModelFromFolder(){
+  if(!myModel)myBuildModel();
+  var rootDir=mySaveFolder;
+  if(!rootDir){try{rootDir=await window.showDirectoryPicker({mode:'read'});}catch(e){if(e.name!=='AbortError')myLog('Folder picker error: '+e.message);return;}}
+  try{
+    var targetDir=rootDir;try{targetDir=await rootDir.getDirectoryHandle('header');}catch(e2){}
+    var binFh=await targetDir.getFileHandle('myWeights.bin');
+    var cfgFh=await targetDir.getFileHandle('config.json').catch(function(){return null;});
+    if(cfgFh){try{myApplyConfigObj(JSON.parse(await(await cfgFh.getFile()).text()));}catch(e3){}}
+    var ab=await(await binFh.getFile()).arrayBuffer();
+    var headerLen=new Uint32Array(ab,0,1)[0];
+    var floatData=new Float32Array(ab,4+headerLen);
+    var wList=myModel.getWeights(),pos=0,newW=[];
+    for(var wi=0;wi<wList.length;wi++){var sz=wList[wi].size;newW.push(tf.tensor(Array.from(floatData.slice(pos,pos+sz)),wList[wi].shape));pos+=sz;}
+    myModel.setWeights(newW);newW.forEach(function(t){t.dispose();});
+    myLog('✓ myWeights.bin loaded into browser model');
+  }catch(e){myLog('Load model error: '+e.message);}
+}
+</script>
+
+<!-- ═══════════════════════════════════════════════════════════════════
+     SCRIPT 8 — v78 BINARY FILE TRANSFER (PC→SD)
+═══════════════════════════════════════════════════════════════════ -->
+<script>
+async function myWaitForEsp32Response(expectedPrefix,timeoutMs){
+  var deadline=Date.now()+(timeoutMs||6000);
+  while(Date.now()<deadline){
+    if(myFileSendAbort) throw new Error('ABORT');
+    while(myXferResponseQueue.length>0){
+      var line=myXferResponseQueue.shift();
+      if(line.startsWith(expectedPrefix)||(expectedPrefix.startsWith('OK:')&&line.startsWith('ERR:'))) return line;
+    }
+    await new Promise(function(r){setTimeout(r,20);});
+  }
+  throw new Error('Timeout ('+timeoutMs+'ms) waiting for "'+expectedPrefix+'"');
+}
+
+async function mySendFile(myFile,myTargetPath){
+  var MY_CHUNK_BYTES=128,MY_MAX_RETRIES=4,MY_INTER_CHUNK_MS=25;
+  var myTotalBytes=myFile.size,myFileBytes=new Uint8Array(await myFile.arrayBuffer());
+  myXferResponseQueue=[];
+  mySerialLog('→ FILE_SEND_START:'+myTargetPath+':'+myTotalBytes);
+  await myWriteSerial('FILE_SEND_START:'+myTargetPath+':'+myTotalBytes+'\n');
+  var myReadyLine=await myWaitForEsp32Response('OK:FILE_READY:',8000);
+  if(!myReadyLine.startsWith('OK:FILE_READY:')) throw new Error('FILE_SEND_START rejected: '+myReadyLine);
+  var myChunkIdx=0;
+  for(var myPos=0;myPos<myTotalBytes;myPos+=MY_CHUNK_BYTES){
+    if(myFileSendAbort) throw new Error('ABORT');
+    var mySlice=myFileBytes.slice(myPos,myPos+MY_CHUNK_BYTES);
+    var myXorCs=0; for(var myI=0;myI<mySlice.length;myI++) myXorCs^=mySlice[myI];
+    var myCs=myXorCs.toString(16).padStart(2,'0').toUpperCase();
+    var myHex=''; for(var myI=0;myI<mySlice.length;myI++) myHex+=mySlice[myI].toString(16).padStart(2,'0').toUpperCase();
+    var myChunkLine='FILE_CHUNK:'+myChunkIdx+':'+myCs+':'+myHex+'\n';
+    var myAckPrefix='OK:CHUNK_ACK:'+myChunkIdx;
+    var myAttempt=0,myAcked=false;
+    while(!myAcked&&myAttempt<MY_MAX_RETRIES){
+      if(myFileSendAbort) throw new Error('ABORT');
+      myXferResponseQueue=[];
+      await myWriteSerial(myChunkLine);
+      var myReply;
+      try{myReply=await myWaitForEsp32Response('OK:CHUNK_ACK:',5000);}
+      catch(e){myAttempt++;await new Promise(function(r){setTimeout(r,100*myAttempt);});continue;}
+      if(myReply===myAckPrefix||myReply.startsWith(myAckPrefix)){myAcked=true;}
+      else{myAttempt++;await new Promise(function(r){setTimeout(r,80*myAttempt);});}
+    }
+    if(!myAcked) throw new Error('Chunk '+myChunkIdx+' failed after '+MY_MAX_RETRIES+' attempts');
+    myChunkIdx++;
+    var myDone=myPos+mySlice.length,myPct=Math.round(myDone/myTotalBytes*100);
+    document.getElementById('myXferProgBar').style.width=myPct+'%';
+    document.getElementById('myXferProgText').textContent=myDone+' / '+myTotalBytes+' bytes ('+myPct+'%)';
+    await new Promise(function(r){setTimeout(r,MY_INTER_CHUNK_MS);});
+  }
+  if(myFileSendAbort) throw new Error('ABORT');
+  myXferResponseQueue=[];
+  await myWriteSerial('FILE_SEND_END:'+myTotalBytes+'\n');
+  var myDoneLine=await myWaitForEsp32Response('OK:FILE_DONE:',8000);
+  if(!myDoneLine.startsWith('OK:FILE_DONE:')) throw new Error('FILE_SEND_END failed: '+myDoneLine);
+}
+
+async function myXferPickFolder(){
+  if(mySaveFolder){myXferFolder=mySaveFolder;document.getElementById('myXferFolderName').textContent=myXferFolder.name+' (project folder)';document.getElementById('myXferSendAllBtn').disabled=false;return;}
+  try{myXferFolder=await window.showDirectoryPicker({mode:'readwrite'});document.getElementById('myXferFolderName').textContent=myXferFolder.name;document.getElementById('myXferSendAllBtn').disabled=false;}
+  catch(e){if(e.name!=='AbortError')myLog('Folder picker error: '+e.message);}
+}
+
+async function myCollectFilesRecursive(dirHandle,basePath,fileList){
+  for await(var entry of dirHandle.entries()){
+    var name=entry[0],handle=entry[1],path=basePath+'/'+name;
+    if(handle.kind==='directory') await myCollectFilesRecursive(handle,path,fileList);
+    else fileList.push({myFile:await handle.getFile(),mySdPath:path});
+  }
+}
+
+function myXferAbort(){myFileSendAbort=true;document.getElementById('myXferStatus').textContent='Aborting...';}
+
+function myXferLogLine(msg){
+  var box=document.getElementById('myXferLog');
+  box.textContent+='['+new Date().toLocaleTimeString()+'] '+msg+'\n';
+  box.scrollTop=box.scrollHeight;
+}
+
+async function mySendAllToSd(){
+  if(!mySerialWriter){alert('Connect to ESP32 first.');return;}
+  if(!myXferFolder){if(mySaveFolder)myXferFolder=mySaveFolder;else{alert('Pick a folder first.');return;}}
+  if(myFileSendActive){alert('Transfer already in progress.');return;}
+  myFileSendActive=true;myFileSendAbort=false;myXferResponseQueue=[];
+  document.getElementById('myXferSendAllBtn').disabled=true;
+  document.getElementById('myXferAbortBtn').style.display='inline-block';
+  document.getElementById('myXferProgBar').style.width='0%';
+  document.getElementById('myXferStatus').textContent='Collecting files...';
+  try{
+    var fileList=[];await myCollectFilesRecursive(myXferFolder,'',fileList);
+    if(!fileList.length){document.getElementById('myXferStatus').textContent='No files found.';return;}
+    var total=fileList.length,ok=0,failed=0;
+    myXferLogLine('Found '+total+' file(s) to send.');
+    for(var fi=0;fi<total;fi++){
+      if(myFileSendAbort){document.getElementById('myXferStatus').textContent='Aborted.';break;}
+      var f=fileList[fi];
+      document.getElementById('myXferCurrentFile').textContent=f.mySdPath;
+      document.getElementById('myXferStatus').textContent='Sending '+(fi+1)+'/'+total+': '+f.mySdPath.split('/').pop();
+      document.getElementById('myXferProgBar').style.width='0%';
+      myXferLogLine('→ '+f.mySdPath+' ('+f.myFile.size+'B)');
+      try{
+        var parentDir=f.mySdPath.substring(0,f.mySdPath.lastIndexOf('/'));
+        if(parentDir) await myEnsureSdDir(parentDir);
+        await mySendFile(f.myFile,f.mySdPath);ok++;myXferLogLine('✓ '+f.mySdPath);
+      }catch(e){if(e.message==='ABORT'){document.getElementById('myXferStatus').textContent='Aborted.';break;}failed++;myXferLogLine('✗ '+f.mySdPath+': '+e.message);await new Promise(function(r){setTimeout(r,200);});}
+    }
+    if(!myFileSendAbort){document.getElementById('myXferStatus').textContent='Done — '+ok+' ok, '+failed+' failed';if(ok>0)myLog('✓ PC→SD: '+ok+' file(s) transferred');}
+  }catch(e){document.getElementById('myXferStatus').textContent='Fatal: '+e.message;myXferLogLine('Fatal: '+e.message);}
+  finally{myFileSendActive=false;myFileSendAbort=false;myXferResponseQueue=[];document.getElementById('myXferSendAllBtn').disabled=false;document.getElementById('myXferAbortBtn').style.display='none';document.getElementById('myXferCurrentFile').textContent='—';}
+}
+</script>
+
+<!-- ═══════════════════════════════════════════════════════════════════
+     SCRIPT 9 — INIT
+═══════════════════════════════════════════════════════════════════ -->
+<script>
+(async function init(){
+  if(navigator.mediaDevices&&navigator.mediaDevices.enumerateDevices){
+    await myPopulateMicOptions();
+  }
+  myRenderClassRows();
+
+  // Wire config textarea sync
+  ['myLearningRate','myBatchSize','myTargetEpochs','myConv1FiltersIn','myConv2FiltersIn'].forEach(function(id){
+    var el=document.getElementById(id);if(el) el.addEventListener('input',myRefreshConfigTextarea);
+  });
+  document.getElementById('myValidationPct').addEventListener('change',function(){myUpdateValBox();myRefreshConfigTextarea();});
+  document.getElementById('myMelBinsIn').addEventListener('change',myUpdateEpochHint);
+  document.getElementById('myMelFramesIn').addEventListener('change',myUpdateEpochHint);
+
+  myUpdateEpochHint();
+  myUpdateRamHint();
+  myRefreshConfigTextarea();
+  myUpdateValBox();
+
+  if(!('serial' in navigator)){
+    var el=document.getElementById('mySerialStatus');
+    el.textContent='WebSerial not supported (use Chrome/Edge)';el.style.color='red';
+  }
+  if(!('showDirectoryPicker' in window)){
+    myLog('⚠ File System Access API not supported — PC folder features disabled (use Chrome/Edge)');
+  }
+
+  myLog('webmcu-sound-web v14 ready');
+  myLog('Tips: Connect ESP32 · Start Browser Mic · Record clips · Start/Rebuild Brain');
+})();
+</script>
+
+</body>
+</html>
